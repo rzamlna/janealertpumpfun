@@ -1,36 +1,23 @@
-# pump-alert-bot
+# janealertpumpfun
 
-Simple Telegram alert bot for fresh Solana tokens (DexScreener-based) with basic quality filters.
+Unified Telegram alert bot:
+- User sends `/start` -> automatically subscribed and receives alert messages.
+- User sends `/stop` -> unsubscribed.
+- Bot scans Solana candidates (DexScreener feeds) and broadcasts formatted alerts to subscribers.
 
 ## Setup
 
-1. Copy env file:
 ```bash
 cp .env.example .env
-```
-
-2. Fill `.env`:
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-
-3. Install deps:
-```bash
 npm install
-```
-
-4. Run:
-```bash
 npm start
 ```
 
-## Notes
-- Uses DexScreener feeds as source.
-- Filters can be tuned in `.env`.
-- Prevents duplicate alerts by pair address during runtime.
-- For 24/7 run, use PM2 or cron + restart policy.
+## Commands
+- `/start` subscribe + welcome alert
+- `/stop` unsubscribe
+- `/status` owner-only if `OWNER_TELEGRAM_ID` is set
 
-## PM2 quick run
-```bash
-pm2 start src/index.js --name pump-alert-bot
-pm2 save
-```
+## Notes
+- This version uses one process (`src/bot.js`) to avoid Telegram `409 Conflict` from multiple `getUpdates` pollers.
+- Filters configurable in `.env`.
