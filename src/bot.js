@@ -107,7 +107,7 @@ function buildTopCallMessage() {
     .slice(0, 10);
 
   const lines = [
-    '🏆 <b>TOP CALL (by milestone)</b>',
+    '🏆 <b>TOP JANE CALL (by milestone)</b>',
     '',
   ];
 
