@@ -4,6 +4,7 @@ Unified Telegram alert bot:
 - `/start` => auto subscribe + welcome alert
 - `/stop` => unsubscribe
 - `/status` => owner-only status
+- `/topcall` => show top 10 tokens by biggest milestone reached
 - Discovery source: **Helius RPC** (pump.fun program activity)
 - Enrichment source: DexScreener (mcap/liquidity/volume/price)
 - Milestone alerts: dynamic from `START_MULTIPLE` (default 1.5x) and then every `STEP_MULTIPLE` (default +0.5x), unlimited

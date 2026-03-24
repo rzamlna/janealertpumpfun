@@ -85,6 +85,40 @@ function isOwner(msg) {
   return String(msg?.from?.id || '') === String(CFG.ownerId);
 }
 
+function shortCa(ca = '') {
+  if (!ca || ca.length < 12) return ca || '-';
+  return `${ca.slice(0, 6)}...${ca.slice(-6)}`;
+}
+
+function buildTopCallMessage() {
+  const calls = Object.values(state.calls || {});
+  if (!calls.length) {
+    return '📊 Top Call: belum ada data call.';
+  }
+
+  const ranked = calls
+    .map((c) => ({
+      name: c.name || 'Unknown',
+      symbol: c.symbol || '?',
+      x: Number(c.lastMilestoneHit || 1),
+      ca: c.tokenAddress || '-',
+    }))
+    .sort((a, b) => b.x - a.x)
+    .slice(0, 10);
+
+  const lines = [
+    '🏆 <b>TOP CALL (by milestone)</b>',
+    '',
+  ];
+
+  ranked.forEach((r, i) => {
+    lines.push(`${i + 1}. <b>${r.name} (${r.symbol})</b> — <b>${r.x.toFixed(2)}x</b>`);
+    lines.push(`   <code>${shortCa(r.ca)}</code>`);
+  });
+
+  return lines.join('\n');
+}
+
 async function tg(method, body) {
   const res = await fetch(`https://api.telegram.org/bot${CFG.token}/${method}`, {
     method: 'POST',
@@ -376,6 +410,10 @@ async function handleCommands() {
         chatId,
         `Subscribers: ${state.subscribers.length}\nSent cache: ${sentSet.size}\nProcessed tx: ${processedSigSet.size}`
       );
+    }
+
+    if (text === '/topcall') {
+      await sendMessage(chatId, buildTopCallMessage());
     }
   }
 }
