@@ -20,7 +20,7 @@ const CFG = {
   heliusRpcUrl: process.env.HELIUS_RPC_URL || '',
   pumpProgramId: process.env.PUMPFUN_PROGRAM_ID || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
   signaturesLimit: Number(process.env.HELIUS_SIGNATURES_LIMIT || 25),
-  milestones: (process.env.MILESTONES || '2,3,5')
+  milestones: (process.env.MILESTONES || '2,3,5,10,20,50,100')
     .split(',')
     .map((x) => Number(x.trim()))
     .filter((n) => Number.isFinite(n) && n > 1)
@@ -212,7 +212,7 @@ function buildMessage(item) {
 
   return [
     `━━━━━━━━━━━━━━━━━━`,
-    `🚨 <b>GLOBAL CALL</b> 🟢`,
+    `🚨 <b>JANE CALL</b> 🟢`,
     `<b>${name} (${symbol})</b>`,
     `━━━━━━━━━━━━━━━━━━`,
     `💵 <b>Price:</b> ${p.priceUsd ? `$${p.priceUsd}` : '-'}`,
@@ -257,7 +257,7 @@ function ensureCallTracked(item) {
 function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
   return [
     `━━━━━━━━━━━━━━━━━━`,
-    `🚀 <b>MILESTONE REACHED</b>`,
+    `🚀 <b>JANE MILESTONE</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
     `━━━━━━━━━━━━━━━━━━`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
