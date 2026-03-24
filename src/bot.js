@@ -311,10 +311,8 @@ function ensureCallTracked(item) {
 
 function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
   return [
-    `━━━━━━━━━━━━━━━━━━`,
     `🚀 <b>JANE MILESTONE</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
-    `━━━━━━━━━━━━━━━━━━`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
     ``,
     `Entry MCAP: ${formatUsd(call.entryMcap)}`,
@@ -324,7 +322,6 @@ function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
     ``,
     `📌 <b>CA</b>`,
     `<code>${call.tokenAddress}</code>`,
-    `━━━━━━━━━━━━━━━━━━`,
   ].join('\n');
 }
 
