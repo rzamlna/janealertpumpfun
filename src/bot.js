@@ -100,7 +100,7 @@ async function sendMessage(chatId, text, opts = {}) {
   return tg('sendMessage', {
     chat_id: chatId,
     text,
-    disable_web_page_preview: false,
+    disable_web_page_preview: true,
     parse_mode: 'HTML',
     ...(opts.replyToMessageId ? { reply_to_message_id: opts.replyToMessageId } : {}),
   });
