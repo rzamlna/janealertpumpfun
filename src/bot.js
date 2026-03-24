@@ -250,11 +250,15 @@ function buildMessage(item) {
 
   const score = Math.min(99, Math.max(1, Math.round((ratio * 30) + (liq / 2000) + (vol / 20000))));
 
-  return [
-    `━━━━━━━━━━━━━━━━━━`,
+  const website = p.info?.websites?.[0]?.url;
+  const socials = Array.isArray(p.info?.socials) ? p.info.socials : [];
+  const x = socials.find((s) => String(s.type).toLowerCase() === 'twitter')?.url;
+  const tgLink = socials.find((s) => String(s.type).toLowerCase() === 'telegram')?.url;
+
+  const lines = [
     `🚨 <b>JANE CALL</b> 🟢`,
     `<b>${name} (${symbol})</b>`,
-    `━━━━━━━━━━━━━━━━━━`,
+    ``,
     `💵 <b>Price:</b> ${p.priceUsd ? `$${p.priceUsd}` : '-'}`,
     `📈 <b>24H:</b> ${toNum(p.priceChange?.h24).toFixed(2)}%`,
     `⭐ <b>Score:</b> ${score}/100`,
@@ -270,9 +274,18 @@ function buildMessage(item) {
     ``,
     `📌 <b>CA</b>`,
     `<code>${ca}</code>`,
-    `🔗 <a href="${pairUrl}">DexScreener</a>`,
-    `━━━━━━━━━━━━━━━━━━`,
-  ].join('\n');
+  ];
+
+  if (website || x || tgLink) {
+    lines.push('');
+    lines.push('🌐 <b>Socials</b>');
+    if (website) lines.push(`• <a href="${website}">Website</a>`);
+    if (x) lines.push(`• <a href="${x}">Twitter/X</a>`);
+    if (tgLink) lines.push(`• <a href="${tgLink}">Telegram</a>`);
+  }
+
+  lines.push(`🔗 <a href="${pairUrl}">DexScreener</a>`);
+  return lines.join('\n');
 }
 
 function ensureCallTracked(item) {
