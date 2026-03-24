@@ -230,38 +230,45 @@ function buildMessage(item) {
 }
 
 async function handleCommands() {
-  try {
-    const updates = await tg('getUpdates', { timeout: 20, offset });
-    for (const u of updates) {
-      offset = u.update_id + 1;
-      const msg = u.message || u.edited_message;
-      if (!msg?.text) continue;
-      const text = msg.text.trim();
-      const chatId = msg.chat.id;
+  const updates = await tg('getUpdates', { timeout: 50, offset });
+  for (const u of updates) {
+    offset = u.update_id + 1;
+    const msg = u.message || u.edited_message;
+    if (!msg?.text) continue;
+    const text = msg.text.trim();
+    const chatId = msg.chat.id;
 
-      if (text.startsWith('/start')) {
-        if (!state.subscribers.includes(chatId)) {
-          state.subscribers.push(chatId);
-          saveState(state);
-        }
-        await sendMessage(chatId, CFG.startAlertText);
-      }
-
-      if (text === '/stop') {
-        state.subscribers = state.subscribers.filter((id) => id !== chatId);
+    if (text.startsWith('/start')) {
+      if (!state.subscribers.includes(chatId)) {
+        state.subscribers.push(chatId);
         saveState(state);
-        await sendMessage(chatId, '🛑 Unsubscribed. Kamu tidak akan menerima alert lagi.');
       }
-
-      if (text === '/status' && isOwner(msg)) {
-        await sendMessage(
-          chatId,
-          `Subscribers: ${state.subscribers.length}\nSent cache: ${sentSet.size}\nProcessed tx: ${processedSigSet.size}`
-        );
-      }
+      await sendMessage(chatId, CFG.startAlertText);
     }
-  } catch (e) {
-    console.error('[updates] error:', e.message || String(e));
+
+    if (text === '/stop') {
+      state.subscribers = state.subscribers.filter((id) => id !== chatId);
+      saveState(state);
+      await sendMessage(chatId, '🛑 Unsubscribed. Kamu tidak akan menerima alert lagi.');
+    }
+
+    if (text === '/status' && isOwner(msg)) {
+      await sendMessage(
+        chatId,
+        `Subscribers: ${state.subscribers.length}\nSent cache: ${sentSet.size}\nProcessed tx: ${processedSigSet.size}`
+      );
+    }
+  }
+}
+
+async function updatesLoop() {
+  while (true) {
+    try {
+      await handleCommands();
+    } catch (e) {
+      console.error('[updates] error:', e.message || String(e));
+      await new Promise((r) => setTimeout(r, 1500));
+    }
   }
 }
 
@@ -300,6 +307,5 @@ async function scanAndBroadcast() {
 }
 
 console.log('pump-alert unified bot (Helius source) started');
-await handleCommands();
-setInterval(handleCommands, 5000);
+updatesLoop();
 setInterval(scanAndBroadcast, CFG.pollMs);
