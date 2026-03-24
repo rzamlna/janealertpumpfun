@@ -20,6 +20,11 @@ const CFG = {
   heliusRpcUrl: process.env.HELIUS_RPC_URL || '',
   pumpProgramId: process.env.PUMPFUN_PROGRAM_ID || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
   signaturesLimit: Number(process.env.HELIUS_SIGNATURES_LIMIT || 25),
+  milestones: (process.env.MILESTONES || '2,3,5')
+    .split(',')
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isFinite(n) && n > 1)
+    .sort((a, b) => a - b),
 
   // Bot behavior
   startAlertText:
@@ -47,9 +52,10 @@ function loadState() {
     s.subscribers = Array.isArray(s.subscribers) ? s.subscribers : [];
     s.sent = Array.isArray(s.sent) ? s.sent : [];
     s.processedSignatures = Array.isArray(s.processedSignatures) ? s.processedSignatures : [];
+    s.calls = s.calls && typeof s.calls === 'object' ? s.calls : {};
     return s;
   } catch {
-    return { subscribers: [], sent: [], processedSignatures: [] };
+    return { subscribers: [], sent: [], processedSignatures: [], calls: {} };
   }
 }
 
@@ -229,6 +235,86 @@ function buildMessage(item) {
   ].join('\n');
 }
 
+function ensureCallTracked(item) {
+  const id = item.p?.pairAddress || item.p?.baseToken?.address;
+  if (!id) return null;
+  if (!state.calls[id]) {
+    state.calls[id] = {
+      id,
+      tokenAddress: item.p?.baseToken?.address || id,
+      symbol: item.p?.baseToken?.symbol || '?',
+      name: item.p?.baseToken?.name || 'Unknown',
+      entryMcap: item.mc,
+      entryPrice: toNum(item.p?.priceUsd),
+      milestonesHit: [],
+      firstSeenAt: Date.now(),
+    };
+    saveState(state);
+  }
+  return id;
+}
+
+function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
+  return [
+    `━━━━━━━━━━━━━━━━━━`,
+    `🚀 <b>MILESTONE REACHED</b>`,
+    `<b>${call.name} (${call.symbol})</b>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `<b>${multiple.toFixed(2)}X REACHED</b>`,
+    ``,
+    `Entry MCAP: ${formatUsd(call.entryMcap)}`,
+    `Now MCAP: ${formatUsd(nowMcap)}`,
+    `Entry Price: ${call.entryPrice ? `$${call.entryPrice}` : '-'}`,
+    `Now Price: ${nowPrice ? `$${nowPrice}` : '-'}`,
+    ``,
+    `📌 <b>CA</b>`,
+    `<code>${call.tokenAddress}</code>`,
+    `━━━━━━━━━━━━━━━━━━`,
+  ].join('\n');
+}
+
+async function checkMilestonesAndBroadcast() {
+  const callIds = Object.keys(state.calls || {});
+  if (!callIds.length || !state.subscribers.length) return;
+
+  for (const id of callIds.slice(-300)) {
+    const call = state.calls[id];
+    if (!call?.tokenAddress || !call?.entryMcap) continue;
+
+    const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${call.tokenAddress}`).catch(() => null);
+    if (!r || !r.ok) continue;
+    const j = await r.json().catch(() => null);
+    const pairs = Array.isArray(j?.pairs)
+      ? j.pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId)
+      : [];
+    if (!pairs.length) continue;
+
+    pairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24));
+    const p = pairs[0];
+
+    const nowMcap = toNum(p.marketCap);
+    const nowPrice = toNum(p.priceUsd);
+    if (nowMcap <= 0 || call.entryMcap <= 0) continue;
+
+    const mult = nowMcap / call.entryMcap;
+    for (const milestone of CFG.milestones) {
+      if (mult >= milestone && !(call.milestonesHit || []).includes(milestone)) {
+        call.milestonesHit = [...(call.milestonesHit || []), milestone];
+        saveState(state);
+
+        const msg = buildMilestoneMessage(call, nowMcap, nowPrice, milestone);
+        for (const chatId of state.subscribers) {
+          try {
+            await sendMessage(chatId, msg);
+          } catch (e) {
+            console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
+          }
+        }
+      }
+    }
+  }
+}
+
 async function handleCommands() {
   const updates = await tg('getUpdates', { timeout: 50, offset });
   for (const u of updates) {
@@ -283,7 +369,7 @@ async function scanAndBroadcast() {
     const picks = pickGoodPairs(pairs);
 
     for (const item of picks) {
-      const id = item.p?.pairAddress || item.p?.baseToken?.address;
+      const id = ensureCallTracked(item);
       if (!id || sentSet.has(id)) continue;
 
       const msg = buildMessage(item);
@@ -300,7 +386,8 @@ async function scanAndBroadcast() {
       saveState(state);
     }
 
-    console.log(`[scan] subscribers=${state.subscribers.length} mints=${mints.length} pairs=${pairs.length} picks=${picks.length} sentSet=${sentSet.size}`);
+    await checkMilestonesAndBroadcast();
+    console.log(`[scan] subscribers=${state.subscribers.length} mints=${mints.length} pairs=${pairs.length} picks=${picks.length} sentSet=${sentSet.size} calls=${Object.keys(state.calls||{}).length}`);
   } catch (e) {
     console.error('[scan] error:', e.message || String(e));
   }
