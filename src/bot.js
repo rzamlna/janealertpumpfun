@@ -96,12 +96,23 @@ async function tg(method, body) {
   return data.result;
 }
 
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, opts = {}) {
   return tg('sendMessage', {
     chat_id: chatId,
     text,
     disable_web_page_preview: false,
     parse_mode: 'HTML',
+    ...(opts.replyToMessageId ? { reply_to_message_id: opts.replyToMessageId } : {}),
+  });
+}
+
+async function sendPhoto(chatId, photoUrl, caption, opts = {}) {
+  return tg('sendPhoto', {
+    chat_id: chatId,
+    photo: photoUrl,
+    caption,
+    parse_mode: 'HTML',
+    ...(opts.replyToMessageId ? { reply_to_message_id: opts.replyToMessageId } : {}),
   });
 }
 
@@ -243,6 +254,8 @@ function ensureCallTracked(item) {
       entryPrice: toNum(item.p?.priceUsd),
       lastMilestoneHit: 1.0,
       firstSeenAt: Date.now(),
+      imageUrl: item.p?.info?.imageUrl || item.p?.info?.header || null,
+      parentMessageIds: {},
     };
     saveState(state);
   }
@@ -305,7 +318,8 @@ async function checkMilestonesAndBroadcast() {
       const msg = buildMilestoneMessage(call, nowMcap, nowPrice, start);
       for (const chatId of state.subscribers) {
         try {
-          await sendMessage(chatId, msg);
+          const replyId = call.parentMessageIds?.[String(chatId)] || undefined;
+          await sendMessage(chatId, msg, { replyToMessageId: replyId });
         } catch (e) {
           console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
         }
@@ -323,7 +337,8 @@ async function checkMilestonesAndBroadcast() {
         const msg = buildMilestoneMessage(call, nowMcap, nowPrice, next);
         for (const chatId of state.subscribers) {
           try {
-            await sendMessage(chatId, msg);
+            const replyId = call.parentMessageIds?.[String(chatId)] || undefined;
+            await sendMessage(chatId, msg, { replyToMessageId: replyId });
           } catch (e) {
             console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
           }
@@ -393,7 +408,18 @@ async function scanAndBroadcast() {
       const msg = buildMessage(item);
       for (const chatId of state.subscribers) {
         try {
-          await sendMessage(chatId, msg);
+          let result;
+          const photoUrl = state.calls[id]?.imageUrl;
+          if (photoUrl) {
+            result = await sendPhoto(chatId, photoUrl, msg);
+          } else {
+            result = await sendMessage(chatId, msg);
+          }
+
+          if (!state.calls[id].parentMessageIds) state.calls[id].parentMessageIds = {};
+          if (result?.message_id) {
+            state.calls[id].parentMessageIds[String(chatId)] = result.message_id;
+          }
         } catch (e) {
           console.error(`[broadcast] chat ${chatId} failed:`, e.message || String(e));
         }
