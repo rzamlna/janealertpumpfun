@@ -252,6 +252,18 @@ function formatSocialsBlock(socials) {
   return `🔗 <b>Socials:</b> ${links.join(' | ')}`;
 }
 
+// Mint address yang diblacklist (stablecoin, wrapped token, dll)
+const BLACKLIST_MINTS = new Set([
+  'So11111111111111111111111111111111111111112',  // Wrapped SOL
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  // mSOL
+  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK (token lama)
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  // JUP
+]);
+
+const scannedMintSet = new Set(); // mint yang sudah pernah diproses
+
 async function fetchCandidateMintsFromHelius() {
   const sigs = await heliusRpc('getSignaturesForAddress', [CFG.pumpProgramId, { limit: CFG.signaturesLimit }]);
   const signatures = (Array.isArray(sigs) ? sigs : [])
@@ -280,15 +292,27 @@ async function fetchCandidateMintsFromHelius() {
     for (const b of balances) {
       const mint = b?.mint;
       if (!mint) continue;
-      if (mint === 'So11111111111111111111111111111111111111112') continue;
+      if (BLACKLIST_MINTS.has(mint)) continue;  // skip stablecoin & token terkenal
+      if (scannedMintSet.has(mint)) continue;   // skip mint yang sudah pernah discan
       mints.add(mint);
     }
+  }
+
+  // Tandai semua mint baru sebagai sudah discan
+  for (const mint of mints) scannedMintSet.add(mint);
+
+  // Trim scannedMintSet biar tidak membengkak (simpan 10000 terakhir)
+  if (scannedMintSet.size > 10000) {
+    const arr = [...scannedMintSet];
+    arr.slice(0, arr.length - 10000).forEach((m) => scannedMintSet.delete(m));
   }
 
   state.processedSignatures = [...processedSigSet].slice(-5000);
   saveState(state);
 
-  return [...mints].slice(0, 25);
+  const result = [...mints].slice(0, 25);
+  console.log(`[mints] new=${result.length} scannedTotal=${scannedMintSet.size}`);
+  return result;
 }
 
 function pickGoodPairs(pairs) {
