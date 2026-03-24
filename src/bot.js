@@ -41,6 +41,8 @@ if (!CFG.heliusApiKey && !CFG.heliusRpcUrl) {
 const HELIUS_RPC =
   CFG.heliusRpcUrl || `https://mainnet.helius-rpc.com/?api-key=${CFG.heliusApiKey}`;
 
+const HELIUS_API_BASE = `https://api.helius.xyz/v0`;
+
 function loadState() {
   try {
     const raw = fs.readFileSync(CFG.stateFile, 'utf8');
@@ -121,6 +123,108 @@ async function heliusRpc(method, params) {
   return json.result;
 }
 
+// ─── NEW: Fetch top 10 holders via Helius API ────────────────────────────────
+async function fetchTopHolders(mintAddress) {
+  try {
+    const url = `${HELIUS_API_BASE}/token-accounts?api-key=${CFG.heliusApiKey}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mintAccounts: [mintAddress],
+        includeNativeBalance: false,
+        displayOptions: {},
+      }),
+    });
+
+    if (!res.ok) return null;
+    const json = await res.json();
+
+    // json is array of token accounts
+    const accounts = Array.isArray(json) ? json : [];
+
+    // Sum total supply from accounts
+    const totalSupply = accounts.reduce((sum, a) => sum + toNum(a.account?.data?.parsed?.info?.tokenAmount?.uiAmount), 0);
+    if (totalSupply <= 0) return null;
+
+    // Sort by balance descending, take top 10
+    const sorted = accounts
+      .map((a) => ({
+        owner: a.account?.data?.parsed?.info?.owner || a.owner || '?',
+        amount: toNum(a.account?.data?.parsed?.info?.tokenAmount?.uiAmount),
+      }))
+      .filter((a) => a.amount > 0)
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 10);
+
+    return sorted.map((a, i) => ({
+      rank: i + 1,
+      owner: a.owner,
+      pct: totalSupply > 0 ? ((a.amount / totalSupply) * 100).toFixed(2) : '0.00',
+    }));
+  } catch (e) {
+    console.error('[fetchTopHolders] error:', e.message || String(e));
+    return null;
+  }
+}
+
+// ─── NEW: Extract social links from DexScreener pair data ───────────────────
+function extractSocials(pair) {
+  const info = pair?.info || {};
+  const socials = Array.isArray(info.socials) ? info.socials : [];
+  const websites = Array.isArray(info.websites) ? info.websites : [];
+
+  const result = {};
+
+  for (const s of socials) {
+    const type = (s.type || '').toLowerCase();
+    if (type === 'twitter' && s.url) result.twitter = s.url;
+    if (type === 'telegram' && s.url) result.telegram = s.url;
+    if (type === 'discord' && s.url) result.discord = s.url;
+  }
+
+  if (websites.length > 0 && websites[0].url) {
+    result.website = websites[0].url;
+  }
+
+  return result;
+}
+
+// ─── NEW: Format top holders block ──────────────────────────────────────────
+function formatHoldersBlock(holders) {
+  if (!holders || !holders.length) return null;
+
+  const top3Pct = holders.slice(0, 3).reduce((sum, h) => sum + parseFloat(h.pct), 0);
+  const top10Pct = holders.reduce((sum, h) => sum + parseFloat(h.pct), 0);
+
+  const rows = holders
+    .map((h) => {
+      const shortOwner = `${h.owner.slice(0, 4)}...${h.owner.slice(-4)}`;
+      return `  ${h.rank}. <code>${shortOwner}</code> — ${h.pct}%`;
+    })
+    .join('\n');
+
+  return [
+    `👥 <b>Top 10 Holders</b>`,
+    rows,
+    `• Top 3: ${top3Pct.toFixed(2)}% | Top 10: ${top10Pct.toFixed(2)}%`,
+  ].join('\n');
+}
+
+// ─── NEW: Format socials block ───────────────────────────────────────────────
+function formatSocialsBlock(socials) {
+  if (!socials || !Object.keys(socials).length) return null;
+
+  const links = [];
+  if (socials.twitter) links.push(`🐦 <a href="${socials.twitter}">Twitter</a>`);
+  if (socials.telegram) links.push(`💬 <a href="${socials.telegram}">Telegram</a>`);
+  if (socials.discord) links.push(`🎮 <a href="${socials.discord}">Discord</a>`);
+  if (socials.website) links.push(`🌐 <a href="${socials.website}">Website</a>`);
+
+  if (!links.length) return null;
+  return `🔗 <b>Socials:</b> ${links.join(' | ')}`;
+}
+
 async function fetchCandidateMintsFromHelius() {
   const sigs = await heliusRpc('getSignaturesForAddress', [CFG.pumpProgramId, { limit: CFG.signaturesLimit }]);
   const signatures = (Array.isArray(sigs) ? sigs : [])
@@ -149,7 +253,6 @@ async function fetchCandidateMintsFromHelius() {
     }
   }
 
-  // persist processed signatures (trim)
   state.processedSignatures = [...processedSigSet].slice(-5000);
   saveState(state);
 
@@ -196,7 +299,8 @@ async function fetchPairsByMints(mints) {
   return [...uniq.values()];
 }
 
-function buildMessage(item) {
+// ─── MODIFIED: buildMessage now accepts holders + socials ───────────────────
+function buildMessage(item, holders, socials) {
   const { p, mc, liq, vol, buys, sells, ratio, age } = item;
   const name = p.baseToken?.name || 'Unknown';
   const symbol = p.baseToken?.symbol || '?';
@@ -205,7 +309,10 @@ function buildMessage(item) {
 
   const score = Math.min(99, Math.max(1, Math.round((ratio * 30) + (liq / 2000) + (vol / 20000))));
 
-  return [
+  const holdersBlock = formatHoldersBlock(holders);
+  const socialsBlock = formatSocialsBlock(socials);
+
+  const lines = [
     `━━━━━━━━━━━━━━━━━━`,
     `🚨 <b>JANE CALL</b> 🟢`,
     `<b>${name} (${symbol})</b>`,
@@ -222,12 +329,27 @@ function buildMessage(item) {
     ``,
     `🧾 <b>Flow</b>`,
     `• 1H Buys/Sells: ${buys}/${sells} (ratio ${ratio.toFixed(2)})`,
-    ``,
-    `📌 <b>CA</b>`,
-    `<code>${ca}</code>`,
-    `🔗 <a href="${pairUrl}">DexScreener</a>`,
-    `━━━━━━━━━━━━━━━━━━`,
-  ].join('\n');
+  ];
+
+  // Insert holders block if available
+  if (holdersBlock) {
+    lines.push(``);
+    lines.push(holdersBlock);
+  }
+
+  // Insert socials block if available
+  if (socialsBlock) {
+    lines.push(``);
+    lines.push(socialsBlock);
+  }
+
+  lines.push(``);
+  lines.push(`📌 <b>CA</b>`);
+  lines.push(`<code>${ca}</code>`);
+  lines.push(`🔗 <a href="${pairUrl}">DexScreener</a>`);
+  lines.push(`━━━━━━━━━━━━━━━━━━`);
+
+  return lines.join('\n');
 }
 
 function ensureCallTracked(item) {
@@ -297,7 +419,6 @@ async function checkMilestonesAndBroadcast() {
     const step = Math.max(0.1, CFG.stepMultiple);
     const last = Number(call.lastMilestoneHit || 1.0);
 
-    // First dynamic trigger from startMultiple (e.g., 1.5x)
     if (last < start && mult >= start) {
       call.lastMilestoneHit = start;
       saveState(state);
@@ -313,7 +434,6 @@ async function checkMilestonesAndBroadcast() {
       continue;
     }
 
-    // Next dynamic triggers every stepMultiple (e.g., +0.5x forever)
     if (mult >= start && last >= start) {
       const next = Number((last + step).toFixed(2));
       if (mult >= next) {
@@ -390,7 +510,16 @@ async function scanAndBroadcast() {
       const id = ensureCallTracked(item);
       if (!id || sentSet.has(id)) continue;
 
-      const msg = buildMessage(item);
+      const mintAddress = item.p?.baseToken?.address;
+
+      // ─── NEW: Fetch holders & socials in parallel ──────────────────────
+      const [holders, socialsRaw] = await Promise.all([
+        mintAddress ? fetchTopHolders(mintAddress) : Promise.resolve(null),
+        Promise.resolve(extractSocials(item.p)),
+      ]);
+
+      const msg = buildMessage(item, holders, socialsRaw);
+
       for (const chatId of state.subscribers) {
         try {
           await sendMessage(chatId, msg);
