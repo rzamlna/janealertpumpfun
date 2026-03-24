@@ -6,7 +6,7 @@ Unified Telegram alert bot:
 - `/status` => owner-only status
 - Discovery source: **Helius RPC** (pump.fun program activity)
 - Enrichment source: DexScreener (mcap/liquidity/volume/price)
-- Milestone alerts: auto send when called token reaches `2x/3x/5x/10x/20x/50x/100x` MCAP (configurable)
+- Milestone alerts: dynamic from `START_MULTIPLE` (default 1.5x) and then every `STEP_MULTIPLE` (default +0.5x), unlimited
 - Buy/sell ratio filter removed to allow more calls
 
 ## Setup

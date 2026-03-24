@@ -19,11 +19,8 @@ const CFG = {
   heliusRpcUrl: process.env.HELIUS_RPC_URL || '',
   pumpProgramId: process.env.PUMPFUN_PROGRAM_ID || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
   signaturesLimit: Number(process.env.HELIUS_SIGNATURES_LIMIT || 25),
-  milestones: (process.env.MILESTONES || '2,3,5,10,20,50,100')
-    .split(',')
-    .map((x) => Number(x.trim()))
-    .filter((n) => Number.isFinite(n) && n > 1)
-    .sort((a, b) => a - b),
+  startMultiple: Number(process.env.START_MULTIPLE || 1.5),
+  stepMultiple: Number(process.env.STEP_MULTIPLE || 0.5),
 
   // Bot behavior
   startAlertText:
@@ -244,7 +241,7 @@ function ensureCallTracked(item) {
       name: item.p?.baseToken?.name || 'Unknown',
       entryMcap: item.mc,
       entryPrice: toNum(item.p?.priceUsd),
-      milestonesHit: [],
+      lastMilestoneHit: 1.0,
       firstSeenAt: Date.now(),
     };
     saveState(state);
@@ -295,12 +292,35 @@ async function checkMilestonesAndBroadcast() {
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
     const mult = nowMcap / call.entryMcap;
-    for (const milestone of CFG.milestones) {
-      if (mult >= milestone && !(call.milestonesHit || []).includes(milestone)) {
-        call.milestonesHit = [...(call.milestonesHit || []), milestone];
+
+    const start = Math.max(1.01, CFG.startMultiple);
+    const step = Math.max(0.1, CFG.stepMultiple);
+    const last = Number(call.lastMilestoneHit || 1.0);
+
+    // First dynamic trigger from startMultiple (e.g., 1.5x)
+    if (last < start && mult >= start) {
+      call.lastMilestoneHit = start;
+      saveState(state);
+
+      const msg = buildMilestoneMessage(call, nowMcap, nowPrice, start);
+      for (const chatId of state.subscribers) {
+        try {
+          await sendMessage(chatId, msg);
+        } catch (e) {
+          console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
+        }
+      }
+      continue;
+    }
+
+    // Next dynamic triggers every stepMultiple (e.g., +0.5x forever)
+    if (mult >= start && last >= start) {
+      const next = Number((last + step).toFixed(2));
+      if (mult >= next) {
+        call.lastMilestoneHit = next;
         saveState(state);
 
-        const msg = buildMilestoneMessage(call, nowMcap, nowPrice, milestone);
+        const msg = buildMilestoneMessage(call, nowMcap, nowPrice, next);
         for (const chatId of state.subscribers) {
           try {
             await sendMessage(chatId, msg);
