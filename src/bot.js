@@ -11,7 +11,6 @@ const CFG = {
   minLiquidity: Number(process.env.MIN_LIQUIDITY_USD || 10000),
   minMcap: Number(process.env.MIN_MCAP_USD || 20000),
   maxMcap: Number(process.env.MAX_MCAP_USD || 150000),
-  minBuySellRatio: Number(process.env.MIN_BUY_SELL_RATIO || 1.2),
   minVol24h: Number(process.env.MIN_VOLUME_24H_USD || 100000),
   chainId: process.env.CHAIN_ID || 'solana',
 
@@ -178,7 +177,6 @@ function pickGoodPairs(pairs) {
     .filter((x) => x.liq >= CFG.minLiquidity)
     .filter((x) => x.mc >= CFG.minMcap && x.mc <= CFG.maxMcap)
     .filter((x) => x.vol >= CFG.minVol24h)
-    .filter((x) => x.ratio >= CFG.minBuySellRatio)
     .sort((a, b) => b.vol - a.vol)
     .slice(0, 8);
 }
