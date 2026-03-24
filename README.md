@@ -1,23 +1,22 @@
-# janealertpumpfun
+# janealertpumpfun (Helius full source)
 
 Unified Telegram alert bot:
-- User sends `/start` -> automatically subscribed and receives alert messages.
-- User sends `/stop` -> unsubscribed.
-- Bot scans Solana candidates (DexScreener feeds) and broadcasts formatted alerts to subscribers.
+- `/start` => auto subscribe + welcome alert
+- `/stop` => unsubscribe
+- `/status` => owner-only status
+- Discovery source: **Helius RPC** (pump.fun program activity)
+- Enrichment source: DexScreener (mcap/liquidity/volume/price)
 
 ## Setup
 
 ```bash
 cp .env.example .env
+# fill TELEGRAM_BOT_TOKEN + HELIUS_API_KEY (+ optional OWNER_TELEGRAM_ID)
 npm install
 npm start
 ```
 
-## Commands
-- `/start` subscribe + welcome alert
-- `/stop` unsubscribe
-- `/status` owner-only if `OWNER_TELEGRAM_ID` is set
-
 ## Notes
-- This version uses one process (`src/bot.js`) to avoid Telegram `409 Conflict` from multiple `getUpdates` pollers.
-- Filters configurable in `.env`.
+- Uses one process (`src/bot.js`) to avoid Telegram `409 Conflict`.
+- Keeps local `state.json` for subscribers, sent cache, and processed signatures.
+- Quality filters configurable in `.env`.
