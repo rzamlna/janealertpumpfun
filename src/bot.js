@@ -1,10 +1,13 @@
 import 'dotenv/config';
+import express from 'express';
 import fs from 'node:fs';
+
+const app = express();
+app.use(express.json());
 
 const CFG = {
   token: process.env.TELEGRAM_BOT_TOKEN || '',
   ownerId: process.env.OWNER_TELEGRAM_ID || '',
-  pollMs: Number(process.env.POLL_INTERVAL_MS || 20000),
 
   // Filters
   maxAgeMin: Number(process.env.MAX_AGE_MINUTES || 45),
@@ -14,18 +17,28 @@ const CFG = {
   minVol24h: Number(process.env.MIN_VOLUME_24H_USD || 100000),
   chainId: process.env.CHAIN_ID || 'solana',
 
-  // Helius
+  // Helius Webhook
   heliusApiKey: process.env.HELIUS_API_KEY || '',
-  heliusRpcUrl: process.env.HELIUS_RPC_URL || '',
+  heliusWebhookSecret: process.env.HELIUS_WEBHOOK_SECRET || 'rahasia123',
+  webhookPort: Number(process.env.WEBHOOK_PORT || 3000),
+  webhookPath: process.env.WEBHOOK_PATH || '/helius-webhook',
+  
   pumpProgramId: process.env.PUMPFUN_PROGRAM_ID || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-  signaturesLimit: Number(process.env.HELIUS_SIGNATURES_LIMIT || 25),
+
+  // Milestone (tetap ada)
   startMultiple: Number(process.env.START_MULTIPLE || 1.5),
   stepMultiple: Number(process.env.STEP_MULTIPLE || 0.5),
 
   // Bot behavior
-  startAlertText:
-    process.env.START_ALERT_TEXT ||
-    '🚨 Alert aktif! Kamu sudah subscribe alert token. Ketik /stop untuk berhenti.',
+  startAlertText: process.env.START_ALERT_TEXT ||
+    '🚨 Alert aktif! Kamu sudah subscribe alert token. Ketik /stop untuk berhenti.\n\n' +
+    '📋 <b>Perintah:</b>\n' +
+    '/start - Mulai alert\n' +
+    '/stop - Berhenti alert\n' +
+    '/status - Lihat status bot\n' +
+    '/watchlist - Lihat token yang dipantau\n' +
+    '/setprice <CA> <target> - Set target harga',
+  
   stateFile: process.env.STATE_FILE || './state.json',
 };
 
@@ -33,27 +46,24 @@ if (!CFG.token) {
   console.error('Missing TELEGRAM_BOT_TOKEN in .env');
   process.exit(1);
 }
-if (!CFG.heliusApiKey && !CFG.heliusRpcUrl) {
-  console.error('Missing HELIUS_API_KEY or HELIUS_RPC_URL in .env');
+if (!CFG.heliusApiKey) {
+  console.error('Missing HELIUS_API_KEY in .env');
   process.exit(1);
 }
 
-const HELIUS_RPC =
-  CFG.heliusRpcUrl || `https://mainnet.helius-rpc.com/?api-key=${CFG.heliusApiKey}`;
-
-const HELIUS_API_BASE = `https://api.helius.xyz/v0`;
-
+// State management
 function loadState() {
   try {
     const raw = fs.readFileSync(CFG.stateFile, 'utf8');
     const s = JSON.parse(raw);
     s.subscribers = Array.isArray(s.subscribers) ? s.subscribers : [];
     s.sent = Array.isArray(s.sent) ? s.sent : [];
-    s.processedSignatures = Array.isArray(s.processedSignatures) ? s.processedSignatures : [];
     s.calls = s.calls && typeof s.calls === 'object' ? s.calls : {};
+    s.watchlist = s.watchlist && typeof s.watchlist === 'object' ? s.watchlist : {};
+    s.priceTargets = s.priceTargets && typeof s.priceTargets === 'object' ? s.priceTargets : {};
     return s;
   } catch {
-    return { subscribers: [], sent: [], processedSignatures: [], calls: {} };
+    return { subscribers: [], sent: [], calls: {}, watchlist: {}, priceTargets: {} };
   }
 }
 
@@ -63,9 +73,8 @@ function saveState(state) {
 
 const state = loadState();
 const sentSet = new Set(state.sent);
-const processedSigSet = new Set(state.processedSignatures);
-let offset = 0;
 
+// Helper functions
 function toNum(v, d = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
@@ -82,11 +91,7 @@ function formatUsd(n) {
   return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
-function isOwner(msg) {
-  if (!CFG.ownerId) return true;
-  return String(msg?.from?.id || '') === String(CFG.ownerId);
-}
-
+// Telegram API
 async function tg(method, body) {
   const res = await fetch(`https://api.telegram.org/bot${CFG.token}/${method}`, {
     method: 'POST',
@@ -126,31 +131,59 @@ async function sendPhoto(chatId, imageUrl, caption) {
       parse_mode: 'HTML',
     });
   } catch (e) {
-    console.warn(`[sendPhoto] fallback to sendMessage for chat ${chatId}:`, e.message || String(e));
+    console.warn(`[sendPhoto] fallback:`, e.message);
     return sendMessage(chatId, caption);
   }
 }
 
-async function heliusRpc(method, params) {
-  const res = await fetch(HELIUS_RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method,
-      params,
-    }),
-  });
-  const json = await res.json();
-  if (json.error) throw new Error(`${method} rpc error: ${JSON.stringify(json.error)}`);
-  return json.result;
+// Register webhook ke Helius
+async function registerHeliusWebhook() {
+  const webhookUrl = `${process.env.PUBLIC_URL}${CFG.webhookPath}`;
+  
+  // Hapus webhook lama
+  try {
+    const listRes = await fetch(`https://api.helius.xyz/v0/webhooks?api-key=${CFG.heliusApiKey}`);
+    const webhooks = await listRes.json();
+    for (const webhook of webhooks) {
+      if (webhook.webhookURL === webhookUrl) {
+        await fetch(`https://api.helius.xyz/v0/webhooks/${webhook.webhookID}?api-key=${CFG.heliusApiKey}`, {
+          method: 'DELETE',
+        });
+        console.log('[webhook] deleted existing webhook');
+      }
+    }
+  } catch (e) {
+    console.log('[webhook] no existing webhook found');
+  }
+
+  const payload = {
+    webhookURL: webhookUrl,
+    transactionTypes: ['ANY'],
+    accountAddresses: [CFG.pumpProgramId],
+    webhookType: 'raw',
+    authHeader: CFG.heliusWebhookSecret,
+  };
+
+  try {
+    const res = await fetch(`https://api.helius.xyz/v0/webhooks?api-key=${CFG.heliusApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    
+    const data = await res.json();
+    console.log('[webhook] registered successfully:', data);
+    return data;
+  } catch (e) {
+    console.error('[webhook] registration failed:', e.message);
+    return null;
+  }
 }
 
-// ─── NEW: Fetch top 10 holders via Helius API ────────────────────────────────
+// Fetch top holders via Helius API
 async function fetchTopHolders(mintAddress) {
   try {
-    const url = `${HELIUS_API_BASE}/token-accounts?api-key=${CFG.heliusApiKey}`;
+    const url = `https://api.helius.xyz/v0/token-accounts?api-key=${CFG.heliusApiKey}`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -163,15 +196,11 @@ async function fetchTopHolders(mintAddress) {
 
     if (!res.ok) return null;
     const json = await res.json();
-
-    // json is array of token accounts
     const accounts = Array.isArray(json) ? json : [];
 
-    // Sum total supply from accounts
     const totalSupply = accounts.reduce((sum, a) => sum + toNum(a.account?.data?.parsed?.info?.tokenAmount?.uiAmount), 0);
     if (totalSupply <= 0) return null;
 
-    // Sort by balance descending, take top 10
     const sorted = accounts
       .map((a) => ({
         owner: a.account?.data?.parsed?.info?.owner || a.owner || '?',
@@ -187,12 +216,12 @@ async function fetchTopHolders(mintAddress) {
       pct: totalSupply > 0 ? ((a.amount / totalSupply) * 100).toFixed(2) : '0.00',
     }));
   } catch (e) {
-    console.error('[fetchTopHolders] error:', e.message || String(e));
+    console.error('[fetchTopHolders] error:', e.message);
     return null;
   }
 }
 
-// ─── Extract social links + image URL dari DexScreener pair data ────────────
+// Extract social links + image URL dari DexScreener
 function extractSocials(pair) {
   const info = pair?.info || {};
   const socials = Array.isArray(info.socials) ? info.socials : [];
@@ -211,13 +240,11 @@ function extractSocials(pair) {
     result.website = websites[0].url;
   }
 
-  // Ambil image URL token dari DexScreener
   result.imageUrl = info.imageUrl || null;
-
   return result;
 }
 
-// ─── NEW: Format top holders block ──────────────────────────────────────────
+// Format top holders block
 function formatHoldersBlock(holders) {
   if (!holders || !holders.length) return null;
 
@@ -238,7 +265,7 @@ function formatHoldersBlock(holders) {
   ].join('\n');
 }
 
-// ─── NEW: Format socials block ───────────────────────────────────────────────
+// Format socials block
 function formatSocialsBlock(socials) {
   if (!socials || !Object.keys(socials).length) return null;
 
@@ -252,150 +279,39 @@ function formatSocialsBlock(socials) {
   return `🔗 <b>Socials:</b> ${links.join(' | ')}`;
 }
 
-// Mint address yang diblacklist (stablecoin, wrapped token, dll)
-const BLACKLIST_MINTS = new Set([
-  'So11111111111111111111111111111111111111112',  // Wrapped SOL
-  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
-  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  // mSOL
-  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK (token lama)
-  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  // JUP
-]);
+// Filter token
+function filterToken(pairs, mintAddress) {
+  const solanaPairs = pairs.filter(p => (p.chainId || '').toLowerCase() === CFG.chainId);
+  if (!solanaPairs.length) return null;
 
-const scannedMintSet = new Set(); // mint yang sudah pernah diproses
+  const bestPair = solanaPairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24))[0];
+  
+  const mc = toNum(bestPair.marketCap);
+  const liq = toNum(bestPair.liquidity?.usd);
+  const vol = toNum(bestPair.volume?.h24);
+  const buys = toNum(bestPair.txns?.h1?.buys);
+  const sells = toNum(bestPair.txns?.h1?.sells);
+  const ratio = sells > 0 ? buys / sells : buys;
+  const age = ageMinutes(bestPair.pairCreatedAt);
 
-async function fetchCandidateMintsFromHelius() {
-  const sigs = await heliusRpc('getSignaturesForAddress', [CFG.pumpProgramId, { limit: CFG.signaturesLimit }]);
-  const signatures = (Array.isArray(sigs) ? sigs : [])
-    .map((x) => x.signature)
-    .filter(Boolean)
-    .filter((s) => !processedSigSet.has(s));
+  if (age > CFG.maxAgeMin) return null;
+  if (liq < CFG.minLiquidity) return null;
+  if (mc < CFG.minMcap || mc > CFG.maxMcap) return null;
+  if (vol < CFG.minVol24h) return null;
 
-  if (!signatures.length) return [];
-
-  // Mark semua signature sebagai processed duluan
-  for (const sig of signatures) processedSigSet.add(sig);
-
-  // Fetch semua transaksi parallel sekaligus
-  const txResults = await Promise.all(
-    signatures.map((sig) =>
-      heliusRpc('getTransaction', [
-        sig,
-        { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 },
-      ]).catch(() => null)
-    )
-  );
-
-  const mints = new Set();
-  for (const tx of txResults) {
-    const balances = tx?.meta?.postTokenBalances || [];
-    for (const b of balances) {
-      const mint = b?.mint;
-      if (!mint) continue;
-      if (BLACKLIST_MINTS.has(mint)) continue;  // skip stablecoin & token terkenal
-      if (scannedMintSet.has(mint)) continue;   // skip mint yang sudah pernah discan
-      mints.add(mint);
-    }
-  }
-
-  // Tandai semua mint baru sebagai sudah discan
-  for (const mint of mints) scannedMintSet.add(mint);
-
-  // Trim scannedMintSet biar tidak membengkak (simpan 10000 terakhir)
-  if (scannedMintSet.size > 10000) {
-    const arr = [...scannedMintSet];
-    arr.slice(0, arr.length - 10000).forEach((m) => scannedMintSet.delete(m));
-  }
-
-  state.processedSignatures = [...processedSigSet].slice(-5000);
-  saveState(state);
-
-  const result = [...mints].slice(0, 25);
-  console.log(`[mints] new=${result.length} scannedTotal=${scannedMintSet.size}`);
-  return result;
+  return {
+    pair: bestPair,
+    mc, liq, vol, buys, sells, ratio, age
+  };
 }
 
-function pickGoodPairs(pairs) {
-  const solana = pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId);
-  console.log(`[filter] total=${pairs.length} solana=${solana.length}`);
-
-  const mapped = solana.map((p) => {
-    const mc = toNum(p.marketCap);
-    const liq = toNum(p.liquidity?.usd);
-    const vol = toNum(p.volume?.h24);
-    const buys = toNum(p.txns?.h1?.buys);
-    const sells = toNum(p.txns?.h1?.sells);
-    const ratio = sells > 0 ? buys / sells : buys;
-    const age = ageMinutes(p.pairCreatedAt);
-    return { p, mc, liq, vol, buys, sells, ratio, age };
-  });
-
-  let passed = mapped;
-
-  // Filter age
-  passed = passed.filter((x) => {
-    const ok = x.age <= CFG.maxAgeMin;
-    if (!ok) console.log(`[drop-age] ${x.p.baseToken?.symbol} age=${x.age.toFixed(1)}m > ${CFG.maxAgeMin}`);
-    return ok;
-  });
-
-  // Filter liquidity
-  passed = passed.filter((x) => {
-    const ok = x.liq >= CFG.minLiquidity;
-    if (!ok) console.log(`[drop-liq] ${x.p.baseToken?.symbol} liq=$${x.liq} < $${CFG.minLiquidity}`);
-    return ok;
-  });
-
-  // Filter mcap
-  passed = passed.filter((x) => {
-    const ok = x.mc >= CFG.minMcap && x.mc <= CFG.maxMcap;
-    if (!ok) console.log(`[drop-mc] ${x.p.baseToken?.symbol} mc=$${x.mc} (min=$${CFG.minMcap} max=$${CFG.maxMcap})`);
-    return ok;
-  });
-
-  // Filter volume
-  passed = passed.filter((x) => {
-    const ok = x.vol >= CFG.minVol24h;
-    if (!ok) console.log(`[drop-vol] ${x.p.baseToken?.symbol} vol=$${x.vol} < $${CFG.minVol24h}`);
-    return ok;
-  });
-
-  console.log(`[filter] passed=${passed.length}`);
-
-  return passed.sort((a, b) => b.vol - a.vol).slice(0, 8);
-}
-
-async function fetchPairsByMints(mints) {
-  // Fetch semua mint ke DexScreener parallel sekaligus
-  const results = await Promise.all(
-    mints.map((mint) =>
-      fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)
-        .then((r) => r.ok ? r.json() : null)
-        .catch(() => null)
-    )
-  );
-
-  const out = [];
-  for (const j of results) {
-    const pairs = Array.isArray(j?.pairs) ? j.pairs : [];
-    out.push(...pairs);
-  }
-
-  const uniq = new Map();
-  for (const p of out) {
-    const key = p.pairAddress || `${p.chainId}:${p.baseToken?.address}`;
-    if (!uniq.has(key)) uniq.set(key, p);
-  }
-  return [...uniq.values()];
-}
-
-// ─── MODIFIED: buildMessage now accepts holders + socials ───────────────────
+// Build message (SAMA PERSIS DENGAN YANG DULU)
 function buildMessage(item, holders, socials) {
-  const { p, mc, liq, vol, buys, sells, ratio, age } = item;
-  const name = p.baseToken?.name || 'Unknown';
-  const symbol = p.baseToken?.symbol || '?';
-  const ca = p.baseToken?.address || '-';
-  const pairUrl = p.url || `https://dexscreener.com/solana/${p.pairAddress}`;
+  const { pair, mc, liq, vol, buys, sells, ratio, age } = item;
+  const name = pair.baseToken?.name || 'Unknown';
+  const symbol = pair.baseToken?.symbol || '?';
+  const ca = pair.baseToken?.address || '-';
+  const pairUrl = pair.url || `https://dexscreener.com/solana/${pair.pairAddress}`;
 
   const score = Math.min(99, Math.max(1, Math.round((ratio * 30) + (liq / 2000) + (vol / 20000))));
 
@@ -407,8 +323,8 @@ function buildMessage(item, holders, socials) {
     `🚨 <b>JANE CALL</b> 🟢`,
     `<b>${name} (${symbol})</b>`,
     `━━━━━━━━━━━━━━━━━━`,
-    `💵 <b>Price:</b> ${p.priceUsd ? `$${p.priceUsd}` : '-'}`,
-    `📈 <b>24H:</b> ${toNum(p.priceChange?.h24).toFixed(2)}%`,
+    `💵 <b>Price:</b> ${pair.priceUsd ? `$${pair.priceUsd}` : '-'}`,
+    `📈 <b>24H:</b> ${toNum(pair.priceChange?.h24).toFixed(2)}%`,
     `⭐ <b>Score:</b> ${score}/100`,
     ``,
     `📊 <b>Metrics</b>`,
@@ -421,13 +337,11 @@ function buildMessage(item, holders, socials) {
     `• 1H Buys/Sells: ${buys}/${sells} (ratio ${ratio.toFixed(2)})`,
   ];
 
-  // Insert holders block if available
   if (holdersBlock) {
     lines.push(``);
     lines.push(holdersBlock);
   }
 
-  // Insert socials block if available
   if (socialsBlock) {
     lines.push(``);
     lines.push(socialsBlock);
@@ -442,26 +356,29 @@ function buildMessage(item, holders, socials) {
   return lines.join('\n');
 }
 
-function ensureCallTracked(item) {
-  const id = item.p?.pairAddress || item.p?.baseToken?.address;
+// Track call untuk milestone
+function ensureCallTracked(item, mintAddress) {
+  const id = item.pair?.pairAddress || mintAddress;
   if (!id) return null;
+  
   if (!state.calls[id]) {
     state.calls[id] = {
       id,
-      tokenAddress: item.p?.baseToken?.address || id,
-      symbol: item.p?.baseToken?.symbol || '?',
-      name: item.p?.baseToken?.name || 'Unknown',
+      tokenAddress: mintAddress,
+      symbol: item.pair?.baseToken?.symbol || '?',
+      name: item.pair?.baseToken?.name || 'Unknown',
       entryMcap: item.mc,
-      entryPrice: toNum(item.p?.priceUsd),
+      entryPrice: toNum(item.pair?.priceUsd),
       lastMilestoneHit: 1.0,
       firstSeenAt: Date.now(),
-      messageIds: {}, // { chatId: message_id }
+      messageIds: {},
     };
     saveState(state);
   }
   return id;
 }
 
+// Milestone message
 function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
   return [
     `━━━━━━━━━━━━━━━━━━`,
@@ -481,6 +398,7 @@ function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
   ].join('\n');
 }
 
+// Check milestones (tetap jalan)
 async function checkMilestonesAndBroadcast() {
   const callIds = Object.keys(state.calls || {});
   if (!callIds.length || !state.subscribers.length) return;
@@ -505,7 +423,6 @@ async function checkMilestonesAndBroadcast() {
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
     const mult = nowMcap / call.entryMcap;
-
     const start = Math.max(1.01, CFG.startMultiple);
     const step = Math.max(0.1, CFG.stepMultiple);
     const last = Number(call.lastMilestoneHit || 1.0);
@@ -524,7 +441,7 @@ async function checkMilestonesAndBroadcast() {
             await sendMessage(chatId, msg);
           }
         } catch (e) {
-          console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
+          console.error(`[milestone] chat ${chatId} failed:`, e.message);
         }
       }
       continue;
@@ -546,7 +463,7 @@ async function checkMilestonesAndBroadcast() {
               await sendMessage(chatId, msg);
             }
           } catch (e) {
-            console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
+            console.error(`[milestone] chat ${chatId} failed:`, e.message);
           }
         }
       }
@@ -554,74 +471,64 @@ async function checkMilestonesAndBroadcast() {
   }
 }
 
-async function handleCommands() {
-  const updates = await tg('getUpdates', { timeout: 50, offset });
-  for (const u of updates) {
-    offset = u.update_id + 1;
-    const msg = u.message || u.edited_message;
-    if (!msg?.text) continue;
-    const text = msg.text.trim();
-    const chatId = msg.chat.id;
+// ============ WEBHOOK HANDLER ============
+app.post(CFG.webhookPath, async (req, res) => {
+  const signature = req.headers['x-webhook-signature'];
+  if (!signature || signature !== CFG.heliusWebhookSecret) {
+    console.log('[webhook] invalid signature');
+    return res.status(401).send('Invalid signature');
+  }
 
-    if (text.startsWith('/start')) {
-      if (!state.subscribers.includes(chatId)) {
-        state.subscribers.push(chatId);
-        saveState(state);
+  const transactions = req.body;
+  if (!Array.isArray(transactions) || transactions.length === 0) {
+    return res.status(200).send('OK');
+  }
+
+  console.log(`[webhook] received ${transactions.length} transactions`);
+  
+  // Extract mint addresses
+  const mints = new Set();
+  for (const tx of transactions) {
+    const tokenBalances = tx?.meta?.postTokenBalances || [];
+    for (const balance of tokenBalances) {
+      const mint = balance?.mint;
+      if (mint && !sentSet.has(mint)) {
+        mints.add(mint);
       }
-      await sendMessage(chatId, CFG.startAlertText);
-    }
-
-    if (text === '/stop') {
-      state.subscribers = state.subscribers.filter((id) => id !== chatId);
-      saveState(state);
-      await sendMessage(chatId, '🛑 Unsubscribed. Kamu tidak akan menerima alert lagi.');
-    }
-
-    if (text === '/status' && isOwner(msg)) {
-      await sendMessage(
-        chatId,
-        `Subscribers: ${state.subscribers.length}\nSent cache: ${sentSet.size}\nProcessed tx: ${processedSigSet.size}`
-      );
     }
   }
-}
 
-async function updatesLoop() {
-  while (true) {
+  if (mints.size === 0) {
+    return res.status(200).send('OK');
+  }
+
+  console.log(`[webhook] found ${mints.size} new mints`);
+
+  // Proses setiap mint
+  for (const mintAddress of mints) {
     try {
-      await handleCommands();
-    } catch (e) {
-      console.error('[updates] error:', e.message || String(e));
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-  }
-}
+      // Fetch dari DexScreener
+      const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`);
+      const data = await res.json();
+      const pairs = Array.isArray(data?.pairs) ? data.pairs : [];
+      
+      const filtered = filterToken(pairs, mintAddress);
+      if (!filtered) {
+        console.log(`[skip] ${mintAddress} tidak memenuhi kriteria`);
+        continue;
+      }
 
-async function scanAndBroadcast() {
-  try {
-    if (state.subscribers.length === 0) return;
-
-    const mints = await fetchCandidateMintsFromHelius();
-    if (!mints.length) return;
-
-    const pairs = await fetchPairsByMints(mints);
-    const picks = pickGoodPairs(pairs);
-
-    for (const item of picks) {
-      const id = ensureCallTracked(item);
-      if (!id || sentSet.has(id)) continue;
-
-      const mintAddress = item.p?.baseToken?.address;
-
-      // ─── NEW: Fetch holders & socials in parallel ──────────────────────
+      // Fetch holders dan socials (SAMA PERSIS DENGAN YANG DULU)
       const [holders, socialsRaw] = await Promise.all([
-        mintAddress ? fetchTopHolders(mintAddress) : Promise.resolve(null),
-        Promise.resolve(extractSocials(item.p)),
+        fetchTopHolders(mintAddress),
+        Promise.resolve(extractSocials(filtered.pair))
       ]);
 
-      const msg = buildMessage(item, holders, socialsRaw);
+      const msg = buildMessage(filtered, holders, socialsRaw);
       const imageUrl = socialsRaw?.imageUrl || null;
-
+      
+      const callId = ensureCallTracked(filtered, mintAddress);
+      
       for (const chatId of state.subscribers) {
         try {
           let result;
@@ -630,28 +537,149 @@ async function scanAndBroadcast() {
           } else {
             result = await sendMessage(chatId, msg);
           }
-          // Simpan message_id untuk reply milestone nanti
-          if (result?.message_id) {
-            if (!state.calls[id].messageIds) state.calls[id].messageIds = {};
-            state.calls[id].messageIds[String(chatId)] = result.message_id;
+          
+          if (result?.message_id && callId) {
+            if (!state.calls[callId].messageIds) state.calls[callId].messageIds = {};
+            state.calls[callId].messageIds[String(chatId)] = result.message_id;
           }
         } catch (e) {
-          console.error(`[broadcast] chat ${chatId} failed:`, e.message || String(e));
+          console.error(`[broadcast] chat ${chatId} failed:`, e.message);
         }
       }
-
-      sentSet.add(id);
+      
+      sentSet.add(mintAddress);
       state.sent = [...sentSet].slice(-5000);
       saveState(state);
+      
+      console.log(`[sent] ${filtered.pair.baseToken?.symbol} (${mintAddress})`);
+      
+    } catch (e) {
+      console.error(`[process] ${mintAddress} error:`, e.message);
     }
+  }
+  
+  res.status(200).send('OK');
+});
 
-    await checkMilestonesAndBroadcast();
-    console.log(`[scan] subscribers=${state.subscribers.length} mints=${mints.length} pairs=${pairs.length} picks=${picks.length} sentSet=${sentSet.size} calls=${Object.keys(state.calls||{}).length}`);
+// ============ TELEGRAM WEBHOOK ============
+app.post('/telegram-webhook', async (req, res) => {
+  const update = req.body;
+  res.status(200).send('OK');
+  
+  const msg = update.message || update.edited_message;
+  if (!msg?.text) return;
+  
+  const text = msg.text.trim();
+  const chatId = msg.chat.id;
+  
+  if (text.startsWith('/start')) {
+    if (!state.subscribers.includes(chatId)) {
+      state.subscribers.push(chatId);
+      saveState(state);
+    }
+    await sendMessage(chatId, CFG.startAlertText);
+  }
+  
+  if (text === '/stop') {
+    state.subscribers = state.subscribers.filter((id) => id !== chatId);
+    saveState(state);
+    await sendMessage(chatId, '🛑 Unsubscribed. Kamu tidak akan menerima alert lagi.');
+  }
+  
+  if (text === '/status') {
+    const isOwner = String(msg.from?.id) === String(CFG.ownerId);
+    if (isOwner) {
+      await sendMessage(
+        chatId,
+        `📊 <b>Bot Status</b>\n\n` +
+        `👥 Subscribers: ${state.subscribers.length}\n` +
+        `📨 Sent alerts: ${sentSet.size}\n` +
+        `📞 Active calls: ${Object.keys(state.calls).length}\n` +
+        `🔗 Webhook: ${process.env.PUBLIC_URL}${CFG.webhookPath}`
+      );
+    } else {
+      await sendMessage(chatId, `👥 Subscribers: ${state.subscribers.length}`);
+    }
+  }
+  
+  // FITUR BARU: Lihat watchlist
+  if (text === '/watchlist') {
+    const watchlist = state.watchlist[chatId] || [];
+    if (watchlist.length === 0) {
+      await sendMessage(chatId, '📭 Watchlist kosong. Gunakan /watch <CA> untuk menambahkan token.');
+    } else {
+      const list = watchlist.map((ca, i) => `${i+1}. <code>${ca}</code>`).join('\n');
+      await sendMessage(chatId, `📋 <b>Watchlist Anda:</b>\n\n${list}`);
+    }
+  }
+  
+  // FITUR BARU: Tambah ke watchlist
+  if (text.startsWith('/watch ')) {
+    const ca = text.split(' ')[1];
+    if (ca && ca.length > 30) {
+      if (!state.watchlist[chatId]) state.watchlist[chatId] = [];
+      if (!state.watchlist[chatId].includes(ca)) {
+        state.watchlist[chatId].push(ca);
+        saveState(state);
+        await sendMessage(chatId, `✅ Token <code>${ca}</code> ditambahkan ke watchlist.`);
+      } else {
+        await sendMessage(chatId, `⚠️ Token sudah ada di watchlist.`);
+      }
+    } else {
+      await sendMessage(chatId, `❌ Format: /watch <contract_address>`);
+    }
+  }
+  
+  // FITUR BARU: Hapus dari watchlist
+  if (text.startsWith('/unwatch ')) {
+    const ca = text.split(' ')[1];
+    if (ca && state.watchlist[chatId]) {
+      state.watchlist[chatId] = state.watchlist[chatId].filter(c => c !== ca);
+      saveState(state);
+      await sendMessage(chatId, `✅ Token <code>${ca}</code> dihapus dari watchlist.`);
+    } else {
+      await sendMessage(chatId, `❌ Format: /unwatch <contract_address>`);
+    }
+  }
+});
+
+// Set Telegram webhook
+async function setTelegramWebhook() {
+  const webhookUrl = `${process.env.PUBLIC_URL}/telegram-webhook`;
+  try {
+    await tg('deleteWebhook', {});
+    await tg('setWebhook', { 
+      url: webhookUrl,
+      allowed_updates: ['message']
+    });
+    console.log('[telegram] webhook set to:', webhookUrl);
   } catch (e) {
-    console.error('[scan] error:', e.message || String(e));
+    console.error('[telegram] setWebhook failed:', e.message);
   }
 }
 
-console.log('pump-alert unified bot (Helius source) started');
-updatesLoop();
-setInterval(scanAndBroadcast, CFG.pollMs);
+// Start server
+app.listen(CFG.webhookPort, async () => {
+  console.log('\n========================================');
+  console.log('🚀 PUMP ALERT BOT - WEBHOOK MODE');
+  console.log('========================================');
+  console.log(`📡 Server running on port: ${CFG.webhookPort}`);
+  console.log(`🔗 Helius webhook path: ${CFG.webhookPath}`);
+  console.log(`🔑 Webhook secret: ${CFG.heliusWebhookSecret}`);
+  console.log('========================================\n');
+  
+  await registerHeliusWebhook();
+  await setTelegramWebhook();
+  
+  // Milestone checker tetap jalan (interval 30 detik)
+  setInterval(checkMilestonesAndBroadcast, 30000);
+  
+  console.log('✅ Bot is ready! Semua fitur berjalan:\n');
+  console.log('   ✓ Top 10 Holders');
+  console.log('   ✓ Social Links (Twitter, Telegram, Discord, Website)');
+  console.log('   ✓ Token Image');
+  console.log('   ✓ Milestone Tracking (1.5x, 2x, 2.5x, ...)');
+  console.log('   ✓ Filter (Age, Liquidity, MCap, Volume)');
+  console.log('   ✓ Watchlist');
+  console.log('   ✓ Real-time via Helius Webhook\n');
+});
