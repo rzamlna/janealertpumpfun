@@ -107,6 +107,21 @@ async function sendMessage(chatId, text) {
   });
 }
 
+async function sendPhoto(chatId, imageUrl, caption) {
+  try {
+    return await tg('sendPhoto', {
+      chat_id: chatId,
+      photo: imageUrl,
+      caption,
+      parse_mode: 'HTML',
+    });
+  } catch (e) {
+    // Fallback ke sendMessage kalau foto gagal (URL invalid, dll)
+    console.warn(`[sendPhoto] fallback to sendMessage for chat ${chatId}:`, e.message || String(e));
+    return sendMessage(chatId, caption);
+  }
+}
+
 async function heliusRpc(method, params) {
   const res = await fetch(HELIUS_RPC, {
     method: 'POST',
@@ -168,7 +183,7 @@ async function fetchTopHolders(mintAddress) {
   }
 }
 
-// ─── NEW: Extract social links from DexScreener pair data ───────────────────
+// ─── Extract social links + image URL dari DexScreener pair data ────────────
 function extractSocials(pair) {
   const info = pair?.info || {};
   const socials = Array.isArray(info.socials) ? info.socials : [];
@@ -186,6 +201,9 @@ function extractSocials(pair) {
   if (websites.length > 0 && websites[0].url) {
     result.website = websites[0].url;
   }
+
+  // Ambil image URL token dari DexScreener
+  result.imageUrl = info.imageUrl || null;
 
   return result;
 }
@@ -519,10 +537,15 @@ async function scanAndBroadcast() {
       ]);
 
       const msg = buildMessage(item, holders, socialsRaw);
+      const imageUrl = socialsRaw?.imageUrl || null;
 
       for (const chatId of state.subscribers) {
         try {
-          await sendMessage(chatId, msg);
+          if (imageUrl) {
+            await sendPhoto(chatId, imageUrl, msg);
+          } else {
+            await sendMessage(chatId, msg);
+          }
         } catch (e) {
           console.error(`[broadcast] chat ${chatId} failed:`, e.message || String(e));
         }
