@@ -107,6 +107,16 @@ async function sendMessage(chatId, text) {
   });
 }
 
+async function sendReply(chatId, text, replyToMessageId) {
+  return tg('sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    reply_to_message_id: replyToMessageId,
+    allow_sending_without_reply: true,
+  });
+}
+
 async function sendPhoto(chatId, imageUrl, caption) {
   try {
     return await tg('sendPhoto', {
@@ -116,7 +126,6 @@ async function sendPhoto(chatId, imageUrl, caption) {
       parse_mode: 'HTML',
     });
   } catch (e) {
-    // Fallback ke sendMessage kalau foto gagal (URL invalid, dll)
     console.warn(`[sendPhoto] fallback to sendMessage for chat ${chatId}:`, e.message || String(e));
     return sendMessage(chatId, caption);
   }
@@ -252,16 +261,21 @@ async function fetchCandidateMintsFromHelius() {
 
   if (!signatures.length) return [];
 
+  // Mark semua signature sebagai processed duluan
+  for (const sig of signatures) processedSigSet.add(sig);
+
+  // Fetch semua transaksi parallel sekaligus
+  const txResults = await Promise.all(
+    signatures.map((sig) =>
+      heliusRpc('getTransaction', [
+        sig,
+        { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 },
+      ]).catch(() => null)
+    )
+  );
+
   const mints = new Set();
-
-  for (const sig of signatures) {
-    processedSigSet.add(sig);
-
-    const tx = await heliusRpc('getTransaction', [
-      sig,
-      { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 },
-    ]).catch(() => null);
-
+  for (const tx of txResults) {
     const balances = tx?.meta?.postTokenBalances || [];
     for (const b of balances) {
       const mint = b?.mint;
@@ -278,33 +292,67 @@ async function fetchCandidateMintsFromHelius() {
 }
 
 function pickGoodPairs(pairs) {
-  return pairs
-    .filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId)
-    .map((p) => {
-      const mc = toNum(p.marketCap);
-      const liq = toNum(p.liquidity?.usd);
-      const vol = toNum(p.volume?.h24);
-      const buys = toNum(p.txns?.h1?.buys);
-      const sells = toNum(p.txns?.h1?.sells);
-      const ratio = sells > 0 ? buys / sells : buys;
-      const age = ageMinutes(p.pairCreatedAt);
+  const solana = pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId);
+  console.log(`[filter] total=${pairs.length} solana=${solana.length}`);
 
-      return { p, mc, liq, vol, buys, sells, ratio, age };
-    })
-    .filter((x) => x.age <= CFG.maxAgeMin)
-    .filter((x) => x.liq >= CFG.minLiquidity)
-    .filter((x) => x.mc >= CFG.minMcap && x.mc <= CFG.maxMcap)
-    .filter((x) => x.vol >= CFG.minVol24h)
-    .sort((a, b) => b.vol - a.vol)
-    .slice(0, 8);
+  const mapped = solana.map((p) => {
+    const mc = toNum(p.marketCap);
+    const liq = toNum(p.liquidity?.usd);
+    const vol = toNum(p.volume?.h24);
+    const buys = toNum(p.txns?.h1?.buys);
+    const sells = toNum(p.txns?.h1?.sells);
+    const ratio = sells > 0 ? buys / sells : buys;
+    const age = ageMinutes(p.pairCreatedAt);
+    return { p, mc, liq, vol, buys, sells, ratio, age };
+  });
+
+  let passed = mapped;
+
+  // Filter age
+  passed = passed.filter((x) => {
+    const ok = x.age <= CFG.maxAgeMin;
+    if (!ok) console.log(`[drop-age] ${x.p.baseToken?.symbol} age=${x.age.toFixed(1)}m > ${CFG.maxAgeMin}`);
+    return ok;
+  });
+
+  // Filter liquidity
+  passed = passed.filter((x) => {
+    const ok = x.liq >= CFG.minLiquidity;
+    if (!ok) console.log(`[drop-liq] ${x.p.baseToken?.symbol} liq=$${x.liq} < $${CFG.minLiquidity}`);
+    return ok;
+  });
+
+  // Filter mcap
+  passed = passed.filter((x) => {
+    const ok = x.mc >= CFG.minMcap && x.mc <= CFG.maxMcap;
+    if (!ok) console.log(`[drop-mc] ${x.p.baseToken?.symbol} mc=$${x.mc} (min=$${CFG.minMcap} max=$${CFG.maxMcap})`);
+    return ok;
+  });
+
+  // Filter volume
+  passed = passed.filter((x) => {
+    const ok = x.vol >= CFG.minVol24h;
+    if (!ok) console.log(`[drop-vol] ${x.p.baseToken?.symbol} vol=$${x.vol} < $${CFG.minVol24h}`);
+    return ok;
+  });
+
+  console.log(`[filter] passed=${passed.length}`);
+
+  return passed.sort((a, b) => b.vol - a.vol).slice(0, 8);
 }
 
 async function fetchPairsByMints(mints) {
+  // Fetch semua mint ke DexScreener parallel sekaligus
+  const results = await Promise.all(
+    mints.map((mint) =>
+      fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)
+        .then((r) => r.ok ? r.json() : null)
+        .catch(() => null)
+    )
+  );
+
   const out = [];
-  for (const mint of mints) {
-    const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`).catch(() => null);
-    if (!r || !r.ok) continue;
-    const j = await r.json().catch(() => null);
+  for (const j of results) {
     const pairs = Array.isArray(j?.pairs) ? j.pairs : [];
     out.push(...pairs);
   }
@@ -383,6 +431,7 @@ function ensureCallTracked(item) {
       entryPrice: toNum(item.p?.priceUsd),
       lastMilestoneHit: 1.0,
       firstSeenAt: Date.now(),
+      messageIds: {}, // { chatId: message_id }
     };
     saveState(state);
   }
@@ -444,7 +493,12 @@ async function checkMilestonesAndBroadcast() {
       const msg = buildMilestoneMessage(call, nowMcap, nowPrice, start);
       for (const chatId of state.subscribers) {
         try {
-          await sendMessage(chatId, msg);
+          const replyToId = call.messageIds?.[String(chatId)];
+          if (replyToId) {
+            await sendReply(chatId, msg, replyToId);
+          } else {
+            await sendMessage(chatId, msg);
+          }
         } catch (e) {
           console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
         }
@@ -461,7 +515,12 @@ async function checkMilestonesAndBroadcast() {
         const msg = buildMilestoneMessage(call, nowMcap, nowPrice, next);
         for (const chatId of state.subscribers) {
           try {
-            await sendMessage(chatId, msg);
+            const replyToId = call.messageIds?.[String(chatId)];
+            if (replyToId) {
+              await sendReply(chatId, msg, replyToId);
+            } else {
+              await sendMessage(chatId, msg);
+            }
           } catch (e) {
             console.error(`[milestone] chat ${chatId} failed:`, e.message || String(e));
           }
@@ -541,10 +600,16 @@ async function scanAndBroadcast() {
 
       for (const chatId of state.subscribers) {
         try {
+          let result;
           if (imageUrl) {
-            await sendPhoto(chatId, imageUrl, msg);
+            result = await sendPhoto(chatId, imageUrl, msg);
           } else {
-            await sendMessage(chatId, msg);
+            result = await sendMessage(chatId, msg);
+          }
+          // Simpan message_id untuk reply milestone nanti
+          if (result?.message_id) {
+            if (!state.calls[id].messageIds) state.calls[id].messageIds = {};
+            state.calls[id].messageIds[String(chatId)] = result.message_id;
           }
         } catch (e) {
           console.error(`[broadcast] chat ${chatId} failed:`, e.message || String(e));
