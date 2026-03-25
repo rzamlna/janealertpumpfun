@@ -169,6 +169,28 @@ async function heliusRpc(method, params) {
   return json.result;
 }
 
+async function fetchPumpFunMcap(ca) {
+  try {
+    const r = await fetch(`https://frontend-api.pump.fun/coins/${ca}`, {
+      headers: { 'Accept': 'application/json' },
+    }).catch(() => null);
+    if (!r || !r.ok) return null;
+    const j = await r.json().catch(() => null);
+    if (!j) return null;
+
+    // usd_market_cap adalah field utama, fallback ke market_cap * solPrice estimasi
+    const mcap = toNum(j.usd_market_cap);
+    const price = toNum(j.price); // harga per token dalam USD (tidak selalu ada)
+    const complete = !!j.complete; // true = sudah graduated ke Raydium
+
+    if (mcap <= 0) return null;
+    return { mcap, price, complete, raw: j };
+  } catch (e) {
+    console.error('[fetchPumpFunMcap] error:', e.message || String(e));
+    return null;
+  }
+}
+
 async function fetchCandidateMintsFromHelius() {
   const sigs = await heliusRpc('getSignaturesForAddress', [CFG.pumpProgramId, { limit: CFG.signaturesLimit }]);
   const signatures = (Array.isArray(sigs) ? sigs : [])
@@ -338,29 +360,47 @@ async function checkMilestonesAndBroadcast() {
     const call = state.calls[id];
     if (!call?.tokenAddress || !call?.entryMcap) continue;
 
+    // ✅ Cek Pump.fun dulu untuk nowMcap yang lebih akurat (bonding curve)
+    // Fallback ke DexScreener kalau Pump.fun tidak return data
+    let nowMcap = 0;
+    let nowPrice = 0;
+    let p = null;
+
+    const pumpData = await fetchPumpFunMcap(call.tokenAddress);
+    if (pumpData && pumpData.mcap > 0) {
+      nowMcap = pumpData.mcap;
+      nowPrice = pumpData.price || 0;
+      console.log(`[pumpfun] ${call.symbol} mcap=${formatUsd(nowMcap)} graduated=${pumpData.complete}`);
+    }
+
+    // Selalu ambil DexScreener juga untuk data priceChange (m5/h1/h6/h24)
     const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${call.tokenAddress}`).catch(() => null);
-    if (!r || !r.ok) continue;
-    const j = await r.json().catch(() => null);
-    const pairs = Array.isArray(j?.pairs)
-      ? j.pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId)
-      : [];
-    if (!pairs.length) continue;
+    if (r && r.ok) {
+      const j = await r.json().catch(() => null);
+      const pairs = Array.isArray(j?.pairs)
+        ? j.pairs.filter((px) => (px.chainId || '').toLowerCase() === CFG.chainId)
+        : [];
+      if (pairs.length) {
+        pairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24));
+        p = pairs[0];
+        // Kalau Pump.fun tidak ada data, pakai DexScreener untuk nowMcap juga
+        if (nowMcap <= 0) {
+          nowMcap = toNum(p.marketCap);
+          nowPrice = toNum(p.priceUsd);
+        }
+      }
+    }
 
-    pairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24));
-    const p = pairs[0];
-
-    const nowMcap = toNum(p.marketCap);
-    const nowPrice = toNum(p.priceUsd);
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
     // ✅ ESTIMASI PEAK dari priceChange m5, h1, h6, h24
     // Semua periode dipakai supaya ATH sebelum rug tetap bisa terdeteksi
     // Formula: kalau change negatif → peak = nowMcap / (1 + change/100)
     // Contoh: nowMcap=$10k, h6=-90% → peak 6 jam lalu = 10000/0.1 = $100k
-    const m5Change  = toNum(p.priceChange?.m5,  0);
-    const h1Change  = toNum(p.priceChange?.h1,  0);
-    const h6Change  = toNum(p.priceChange?.h6,  0);
-    const h24Change = toNum(p.priceChange?.h24, 0);
+    const m5Change  = toNum(p?.priceChange?.m5,  0);
+    const h1Change  = toNum(p?.priceChange?.h1,  0);
+    const h6Change  = toNum(p?.priceChange?.h6,  0);
+    const h24Change = toNum(p?.priceChange?.h24, 0);
 
     function estPeak(nowMcap, change) {
       if (change >= 0) return nowMcap; // masih naik/flat, peak = sekarang
