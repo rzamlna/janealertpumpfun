@@ -315,7 +315,7 @@ function ensureCallTracked(item) {
 
 function buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, multiple) {
   return [
-    `🚀 <b>JANE MILESTONE</b>`,
+    `🚀 <b>JANE PRICE UP</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
     ``,
@@ -353,12 +353,27 @@ async function checkMilestonesAndBroadcast() {
     const nowPrice = toNum(p.priceUsd);
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
-    // ✅ UPDATE PEAK: simpan MCAP tertinggi yang pernah tercapai
+    // ✅ ESTIMASI PEAK dari priceChange.h1
+    // Kalau h1 = +200%, berarti 1 jam lalu harga = nowMcap / (1 + 2.0) = nowMcap / 3
+    // Tapi kita mau peak-nya: kalau sekarang sudah dump, peak kemungkinan di awal h1
+    // Jadi peak estimate = nowMcap * (1 + h1/100) saat h1 positif (harga naik dari 1 jam lalu ke sekarang tidak membantu)
+    // Yang benar: kalau h1 negatif (sudah dump), peak = nowMcap / (1 + h1/100)
+    const h1Change = toNum(p.priceChange?.h1, 0);
+    let peakEstimate = nowMcap;
+    if (h1Change < 0) {
+      // Harga sudah turun dari peak di jam ini — estimasi peak 1 jam lalu
+      const divisor = 1 + h1Change / 100;
+      if (divisor > 0.01) peakEstimate = nowMcap / divisor;
+    } else {
+      // Harga masih naik atau flat — peak kemungkinan sekarang
+      peakEstimate = nowMcap;
+    }
+
+    // ✅ UPDATE PEAK: ambil tertinggi dari peak tersimpan, nowMcap, dan estimasi h1
     const prevPeak = toNum(call.peakMcap) || call.entryMcap;
-    const peakMcap = Math.max(prevPeak, nowMcap);
+    const peakMcap = Math.max(prevPeak, nowMcap, peakEstimate);
     if (peakMcap > prevPeak) {
       call.peakMcap = peakMcap;
-      // tidak saveState dulu, biar efisien, save saat milestone hit
     }
 
     // ✅ GUNAKAN PEAK untuk hitung multiplier, bukan nowMcap
@@ -368,7 +383,7 @@ async function checkMilestonesAndBroadcast() {
     const step = Math.max(0.1, CFG.stepMultiple);
     const last = Number(call.lastMilestoneHit || 1.0);
 
-    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} now=${formatUsd(nowMcap)} mult=${mult.toFixed(3)} last=${last} start=${start}`);
+    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} peakEst=${formatUsd(peakEstimate)} now=${formatUsd(nowMcap)} h1=${h1Change.toFixed(1)}% mult=${mult.toFixed(3)} last=${last} start=${start}`);
 
     // First dynamic trigger from startMultiple (e.g., 1.5x)
     if (last < start && mult >= start) {
@@ -447,6 +462,75 @@ async function handleCommands() {
 
     if (text === '/topcall') {
       await sendMessage(chatId, buildTopCallMessage());
+    }
+
+    // ✅ Owner manual add milestone + broadcast ke semua subscriber
+    if (text.startsWith('/addmilestone') && isOwner(msg)) {
+      const parts = text.split(/\s+/);
+      const ca = parts[1]?.trim();
+      const mult = parseFloat(parts[2]);
+
+      if (!ca || !Number.isFinite(mult) || mult <= 1) {
+        await sendMessage(chatId, '❌ Format salah. Contoh:\n<code>/addmilestone ABC123...XYZ 2.5</code>');
+        continue;
+      }
+
+      // Cari call by tokenAddress atau id (pairAddress)
+      const found = Object.values(state.calls).find(
+        (c) => c.tokenAddress === ca || c.id === ca
+      );
+
+      if (!found) {
+        await sendMessage(chatId, `❌ CA tidak ditemukan di state:\n<code>${ca}</code>\nToken harus pernah di-call dulu.`);
+        continue;
+      }
+
+      const prevMilestone = found.lastMilestoneHit;
+
+      // Ambil data harga terkini dari dexscreener
+      let nowMcap = found.entryMcap * mult;
+      let nowPrice = found.entryPrice * mult;
+      try {
+        const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${found.tokenAddress}`).catch(() => null);
+        if (r && r.ok) {
+          const j = await r.json().catch(() => null);
+          const pairs = Array.isArray(j?.pairs)
+            ? j.pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId)
+            : [];
+          if (pairs.length) {
+            pairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24));
+            const p = pairs[0];
+            nowMcap = toNum(p.marketCap) || nowMcap;
+            nowPrice = toNum(p.priceUsd) || nowPrice;
+          }
+        }
+      } catch (_) {}
+
+      // Update state
+      found.lastMilestoneHit = mult;
+      found.peakMcap = Math.max(toNum(found.peakMcap) || 0, nowMcap);
+      saveState(state);
+
+      // Konfirmasi ke owner
+      await sendMessage(
+        chatId,
+        `✅ Milestone diupdate!\n\n` +
+        `Token: <b>${found.name} (${found.symbol})</b>\n` +
+        `<code>${found.tokenAddress}</code>\n\n` +
+        `lastMilestoneHit: <b>${prevMilestone}x</b> → <b>${mult}x</b>\n\n` +
+        `Broadcast ke ${state.subscribers.length} subscriber...`
+      );
+
+      // Broadcast notif milestone ke semua subscriber dengan format standar
+      const broadcastMsg = buildMilestoneMessage(found, found.peakMcap, nowMcap, nowPrice, mult);
+      for (const subscriberId of state.subscribers) {
+        try {
+          const replyId = found.parentMessageIds?.[String(subscriberId)] || undefined;
+          await sendMessage(subscriberId, broadcastMsg, { replyToMessageId: replyId });
+        } catch (e) {
+          console.error(`[addmilestone] broadcast to ${subscriberId} failed:`, e.message || String(e));
+        }
+      }
     }
   }
 }
