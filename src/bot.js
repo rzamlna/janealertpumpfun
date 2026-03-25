@@ -519,8 +519,7 @@ async function handleCommands() {
       const ca = parts[1]?.trim();
 
       if (!ca) {
-        await sendMessage(chatId, '❌ Format salah. Contoh:
-<code>/call ABC123...XYZpump</code>');
+        await sendMessage(chatId, '❌ Format salah. Contoh:\n<code>/call ABC123...XYZpump</code>');
         continue;
       }
 
