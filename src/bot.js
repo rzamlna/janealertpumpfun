@@ -336,15 +336,21 @@ function ensureCallTracked(item) {
 }
 
 function buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, multiple) {
+  // Target MCAP = tepat entry × multiple (bukan harga saat polling)
+  const targetMcap = call.entryMcap * multiple;
+  const targetPrice = call.entryPrice > 0 ? call.entryPrice * multiple : null;
+
   return [
     `🚀 <b>JANE MILESTONE</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
     ``,
     `Entry MCAP: ${formatUsd(call.entryMcap)}`,
+    `Target MCAP: ${formatUsd(targetMcap)}`,
     `Peak MCAP: ${formatUsd(peakMcap)}`,
     `Now MCAP: ${formatUsd(nowMcap)}`,
     `Entry Price: ${call.entryPrice ? `$${call.entryPrice}` : '-'}`,
+    `Target Price: ${targetPrice ? `$${targetPrice.toFixed(10).replace(/\.?0+$/, '')}` : '-'}`,
     `Now Price: ${nowPrice ? `$${nowPrice}` : '-'}`,
     ``,
     `📌 <b>CA</b>`,
