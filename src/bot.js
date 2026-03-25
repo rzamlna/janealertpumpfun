@@ -315,7 +315,7 @@ function ensureCallTracked(item) {
 
 function buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, multiple) {
   return [
-    `🚀 <b>JANE PRICE UP</b>`,
+    `🚀 <b>JANE MILESTONE</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
     ``,
@@ -353,25 +353,28 @@ async function checkMilestonesAndBroadcast() {
     const nowPrice = toNum(p.priceUsd);
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
-    // ✅ ESTIMASI PEAK dari priceChange.h1
-    // Kalau h1 = +200%, berarti 1 jam lalu harga = nowMcap / (1 + 2.0) = nowMcap / 3
-    // Tapi kita mau peak-nya: kalau sekarang sudah dump, peak kemungkinan di awal h1
-    // Jadi peak estimate = nowMcap * (1 + h1/100) saat h1 positif (harga naik dari 1 jam lalu ke sekarang tidak membantu)
-    // Yang benar: kalau h1 negatif (sudah dump), peak = nowMcap / (1 + h1/100)
+    // ✅ ESTIMASI PEAK dari priceChange.m5 dan h1
+    // Kalau m5/h1 negatif → harga sudah dump dari peak di periode itu
+    // peak estimate = nowMcap / (1 + change/100)
+    // Contoh: nowMcap=$45k, m5=-40% → peak 5 menit lalu = 45000/0.6 = $75k
+    const m5Change = toNum(p.priceChange?.m5, 0);
     const h1Change = toNum(p.priceChange?.h1, 0);
-    let peakEstimate = nowMcap;
-    if (h1Change < 0) {
-      // Harga sudah turun dari peak di jam ini — estimasi peak 1 jam lalu
-      const divisor = 1 + h1Change / 100;
-      if (divisor > 0.01) peakEstimate = nowMcap / divisor;
-    } else {
-      // Harga masih naik atau flat — peak kemungkinan sekarang
-      peakEstimate = nowMcap;
+
+    let peakEstM5 = nowMcap;
+    if (m5Change < 0) {
+      const divisor = 1 + m5Change / 100;
+      if (divisor > 0.01) peakEstM5 = nowMcap / divisor;
     }
 
-    // ✅ UPDATE PEAK: ambil tertinggi dari peak tersimpan, nowMcap, dan estimasi h1
+    let peakEstH1 = nowMcap;
+    if (h1Change < 0) {
+      const divisor = 1 + h1Change / 100;
+      if (divisor > 0.01) peakEstH1 = nowMcap / divisor;
+    }
+
+    // ✅ UPDATE PEAK: ambil tertinggi dari semua sumber
     const prevPeak = toNum(call.peakMcap) || call.entryMcap;
-    const peakMcap = Math.max(prevPeak, nowMcap, peakEstimate);
+    const peakMcap = Math.max(prevPeak, nowMcap, peakEstM5, peakEstH1);
     if (peakMcap > prevPeak) {
       call.peakMcap = peakMcap;
     }
@@ -383,7 +386,7 @@ async function checkMilestonesAndBroadcast() {
     const step = Math.max(0.1, CFG.stepMultiple);
     const last = Number(call.lastMilestoneHit || 1.0);
 
-    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} peakEst=${formatUsd(peakEstimate)} now=${formatUsd(nowMcap)} h1=${h1Change.toFixed(1)}% mult=${mult.toFixed(3)} last=${last} start=${start}`);
+    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} estM5=${formatUsd(peakEstM5)} estH1=${formatUsd(peakEstH1)} now=${formatUsd(nowMcap)} m5=${m5Change.toFixed(1)}% h1=${h1Change.toFixed(1)}% mult=${mult.toFixed(3)} last=${last}`);
 
     // First dynamic trigger from startMultiple (e.g., 1.5x)
     if (last < start && mult >= start) {
