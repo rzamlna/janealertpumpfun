@@ -100,7 +100,10 @@ function buildTopCallMessage() {
     .map((c) => ({
       name: c.name || 'Unknown',
       symbol: c.symbol || '?',
-      x: Number(c.lastMilestoneHit || 1),
+      // Gunakan peakMcap untuk hitung x tertinggi yang pernah dicapai
+      x: c.entryMcap > 0
+        ? Math.max(Number(c.lastMilestoneHit || 1), (c.peakMcap || c.entryMcap) / c.entryMcap)
+        : Number(c.lastMilestoneHit || 1),
       ca: c.tokenAddress || '-',
     }))
     .sort((a, b) => b.x - a.x)
@@ -300,6 +303,7 @@ function ensureCallTracked(item) {
       entryMcap: item.mc,
       entryPrice: toNum(item.p?.priceUsd),
       lastMilestoneHit: 1.0,
+      peakMcap: item.mc, // ✅ track peak dari awal
       firstSeenAt: Date.now(),
       imageUrl: item.p?.info?.imageUrl || item.p?.info?.header || null,
       parentMessageIds: {},
@@ -309,13 +313,14 @@ function ensureCallTracked(item) {
   return id;
 }
 
-function buildMilestoneMessage(call, nowMcap, nowPrice, multiple) {
+function buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, multiple) {
   return [
     `🚀 <b>JANE MILESTONE</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
     ``,
     `Entry MCAP: ${formatUsd(call.entryMcap)}`,
+    `Peak MCAP: ${formatUsd(peakMcap)}`,
     `Now MCAP: ${formatUsd(nowMcap)}`,
     `Entry Price: ${call.entryPrice ? `$${call.entryPrice}` : '-'}`,
     `Now Price: ${nowPrice ? `$${nowPrice}` : '-'}`,
@@ -348,18 +353,30 @@ async function checkMilestonesAndBroadcast() {
     const nowPrice = toNum(p.priceUsd);
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
-    const mult = nowMcap / call.entryMcap;
+    // ✅ UPDATE PEAK: simpan MCAP tertinggi yang pernah tercapai
+    const prevPeak = toNum(call.peakMcap) || call.entryMcap;
+    const peakMcap = Math.max(prevPeak, nowMcap);
+    if (peakMcap > prevPeak) {
+      call.peakMcap = peakMcap;
+      // tidak saveState dulu, biar efisien, save saat milestone hit
+    }
+
+    // ✅ GUNAKAN PEAK untuk hitung multiplier, bukan nowMcap
+    const mult = peakMcap / call.entryMcap;
 
     const start = Math.max(1.01, CFG.startMultiple);
     const step = Math.max(0.1, CFG.stepMultiple);
     const last = Number(call.lastMilestoneHit || 1.0);
 
+    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} now=${formatUsd(nowMcap)} mult=${mult.toFixed(3)} last=${last} start=${start}`);
+
     // First dynamic trigger from startMultiple (e.g., 1.5x)
     if (last < start && mult >= start) {
       call.lastMilestoneHit = start;
+      call.peakMcap = peakMcap;
       saveState(state);
 
-      const msg = buildMilestoneMessage(call, nowMcap, nowPrice, start);
+      const msg = buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, start);
       for (const chatId of state.subscribers) {
         try {
           const replyId = call.parentMessageIds?.[String(chatId)] || undefined;
@@ -376,9 +393,10 @@ async function checkMilestonesAndBroadcast() {
       const next = Number((last + step).toFixed(2));
       if (mult >= next) {
         call.lastMilestoneHit = next;
+        call.peakMcap = peakMcap;
         saveState(state);
 
-        const msg = buildMilestoneMessage(call, nowMcap, nowPrice, next);
+        const msg = buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, next);
         for (const chatId of state.subscribers) {
           try {
             const replyId = call.parentMessageIds?.[String(chatId)] || undefined;
@@ -388,6 +406,11 @@ async function checkMilestonesAndBroadcast() {
           }
         }
       }
+    }
+
+    // Simpan peakMcap meski tidak ada milestone baru
+    if (peakMcap > prevPeak) {
+      saveState(state);
     }
   }
 }
