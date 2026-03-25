@@ -353,28 +353,30 @@ async function checkMilestonesAndBroadcast() {
     const nowPrice = toNum(p.priceUsd);
     if (nowMcap <= 0 || call.entryMcap <= 0) continue;
 
-    // ✅ ESTIMASI PEAK dari priceChange.m5 dan h1
-    // Kalau m5/h1 negatif → harga sudah dump dari peak di periode itu
-    // peak estimate = nowMcap / (1 + change/100)
-    // Contoh: nowMcap=$45k, m5=-40% → peak 5 menit lalu = 45000/0.6 = $75k
-    const m5Change = toNum(p.priceChange?.m5, 0);
-    const h1Change = toNum(p.priceChange?.h1, 0);
+    // ✅ ESTIMASI PEAK dari priceChange m5, h1, h6, h24
+    // Semua periode dipakai supaya ATH sebelum rug tetap bisa terdeteksi
+    // Formula: kalau change negatif → peak = nowMcap / (1 + change/100)
+    // Contoh: nowMcap=$10k, h6=-90% → peak 6 jam lalu = 10000/0.1 = $100k
+    const m5Change  = toNum(p.priceChange?.m5,  0);
+    const h1Change  = toNum(p.priceChange?.h1,  0);
+    const h6Change  = toNum(p.priceChange?.h6,  0);
+    const h24Change = toNum(p.priceChange?.h24, 0);
 
-    let peakEstM5 = nowMcap;
-    if (m5Change < 0) {
-      const divisor = 1 + m5Change / 100;
-      if (divisor > 0.01) peakEstM5 = nowMcap / divisor;
+    function estPeak(nowMcap, change) {
+      if (change >= 0) return nowMcap; // masih naik/flat, peak = sekarang
+      const divisor = 1 + change / 100;
+      if (divisor < 0.01) return nowMcap; // ekstrem, abaikan
+      return nowMcap / divisor;
     }
 
-    let peakEstH1 = nowMcap;
-    if (h1Change < 0) {
-      const divisor = 1 + h1Change / 100;
-      if (divisor > 0.01) peakEstH1 = nowMcap / divisor;
-    }
+    const peakEstM5  = estPeak(nowMcap, m5Change);
+    const peakEstH1  = estPeak(nowMcap, h1Change);
+    const peakEstH6  = estPeak(nowMcap, h6Change);
+    const peakEstH24 = estPeak(nowMcap, h24Change);
 
     // ✅ UPDATE PEAK: ambil tertinggi dari semua sumber
     const prevPeak = toNum(call.peakMcap) || call.entryMcap;
-    const peakMcap = Math.max(prevPeak, nowMcap, peakEstM5, peakEstH1);
+    const peakMcap = Math.max(prevPeak, nowMcap, peakEstM5, peakEstH1, peakEstH6, peakEstH24);
     if (peakMcap > prevPeak) {
       call.peakMcap = peakMcap;
     }
@@ -386,7 +388,7 @@ async function checkMilestonesAndBroadcast() {
     const step = Math.max(0.1, CFG.stepMultiple);
     const last = Number(call.lastMilestoneHit || 1.0);
 
-    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} estM5=${formatUsd(peakEstM5)} estH1=${formatUsd(peakEstH1)} now=${formatUsd(nowMcap)} m5=${m5Change.toFixed(1)}% h1=${h1Change.toFixed(1)}% mult=${mult.toFixed(3)} last=${last}`);
+    console.log(`[milestone-check] ${call.symbol} | entry=${formatUsd(call.entryMcap)} peak=${formatUsd(peakMcap)} now=${formatUsd(nowMcap)} m5=${m5Change.toFixed(1)}% h1=${h1Change.toFixed(1)}% h6=${h6Change.toFixed(1)}% h24=${h24Change.toFixed(1)}% mult=${mult.toFixed(3)} last=${last}`);
 
     // First dynamic trigger from startMultiple (e.g., 1.5x)
     if (last < start && mult >= start) {
