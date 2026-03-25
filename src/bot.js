@@ -340,7 +340,7 @@ function buildMilestoneMessage(call, peakMcap, nowMcap, nowPrice, multiple) {
   const reachedPrice = call.entryPrice > 0 ? call.entryPrice * multiple : null;
 
   return [
-    `🚀 <b>JANE MULTIPLE</b>`,
+    `🚀 <b>JANE MILESTONE</b>`,
     `<b>${call.name} (${call.symbol})</b>`,
     `<b>${multiple.toFixed(2)}X REACHED</b>`,
     ``,
@@ -511,6 +511,125 @@ async function handleCommands() {
 
     if (text === '/topcall') {
       await sendMessage(chatId, buildTopCallMessage());
+    }
+
+    // ✅ Owner manual call token → auto fetch + broadcast ke semua subscriber
+    if (text.startsWith('/call') && isOwner(msg)) {
+      const parts = text.split(/\s+/);
+      const ca = parts[1]?.trim();
+
+      if (!ca) {
+        await sendMessage(chatId, '❌ Format salah. Contoh:
+<code>/call ABC123...XYZpump</code>');
+        continue;
+      }
+
+      await sendMessage(chatId, `🔍 Fetching data untuk <code>${ca}</code>...`);
+
+      // Coba Pump.fun dulu
+      let item = null;
+      try {
+        const pumpData = await fetchPumpFunMcap(ca);
+        if (pumpData && pumpData.mcap > 0) {
+          // Fetch DexScreener untuk data lengkap (nama, sosial, dll)
+          const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`).catch(() => null);
+          if (r && r.ok) {
+            const j = await r.json().catch(() => null);
+            const pairs = Array.isArray(j?.pairs)
+              ? j.pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId)
+              : [];
+            if (pairs.length) {
+              pairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24));
+              const p = pairs[0];
+              const mc = pumpData.mcap; // pakai mcap dari pumpfun
+              const liq = toNum(p.liquidity?.usd);
+              const vol = toNum(p.volume?.h24);
+              const buys = toNum(p.txns?.h1?.buys);
+              const sells = toNum(p.txns?.h1?.sells);
+              const ratio = sells > 0 ? buys / sells : buys;
+              const age = ageMinutes(p.pairCreatedAt);
+              item = { p, mc, liq, vol, buys, sells, ratio, age };
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[/call pumpfun]', e.message || String(e));
+      }
+
+      // Fallback: DexScreener saja
+      if (!item) {
+        try {
+          const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`).catch(() => null);
+          if (r && r.ok) {
+            const j = await r.json().catch(() => null);
+            const pairs = Array.isArray(j?.pairs)
+              ? j.pairs.filter((p) => (p.chainId || '').toLowerCase() === CFG.chainId)
+              : [];
+            if (pairs.length) {
+              pairs.sort((a, b) => toNum(b.volume?.h24) - toNum(a.volume?.h24));
+              const p = pairs[0];
+              const mc = toNum(p.marketCap);
+              const liq = toNum(p.liquidity?.usd);
+              const vol = toNum(p.volume?.h24);
+              const buys = toNum(p.txns?.h1?.buys);
+              const sells = toNum(p.txns?.h1?.sells);
+              const ratio = sells > 0 ? buys / sells : buys;
+              const age = ageMinutes(p.pairCreatedAt);
+              item = { p, mc, liq, vol, buys, sells, ratio, age };
+            }
+          }
+        } catch (e) {
+          console.error('[/call dexscreener]', e.message || String(e));
+        }
+      }
+
+      if (!item || item.mc <= 0) {
+        await sendMessage(chatId, `❌ Tidak bisa fetch data untuk CA:
+<code>${ca}</code>
+Pastikan CA benar dan token sudah ada di DexScreener/Pump.fun.`);
+        continue;
+      }
+
+      // Track call di state
+      const id = ensureCallTracked(item);
+
+      // Broadcast ke semua subscriber
+      const broadcastMsg = buildMessage(item);
+      let sentCount = 0;
+      for (const subscriberId of state.subscribers) {
+        try {
+          let result;
+          const photoUrl = state.calls[id]?.imageUrl;
+          if (photoUrl) {
+            result = await sendPhoto(subscriberId, photoUrl, broadcastMsg);
+          } else {
+            result = await sendMessage(subscriberId, broadcastMsg);
+          }
+          if (!state.calls[id].parentMessageIds) state.calls[id].parentMessageIds = {};
+          if (result?.message_id) {
+            state.calls[id].parentMessageIds[String(subscriberId)] = result.message_id;
+          }
+          sentCount++;
+        } catch (e) {
+          console.error(`[/call broadcast] ${subscriberId} failed:`, e.message || String(e));
+        }
+      }
+
+      // Tandai sudah dikirim
+      sentSet.add(id);
+      state.sent = [...sentSet].slice(-5000);
+      saveState(state);
+
+      await sendMessage(chatId,
+        `✅ Call berhasil di-broadcast!
+
+` +
+        `Token: <b>${item.p?.baseToken?.name} (${item.p?.baseToken?.symbol})</b>
+` +
+        `MCAP: <b>${formatUsd(item.mc)}</b>
+` +
+        `Terkirim ke: <b>${sentCount} subscriber</b>`
+      );
     }
 
     // ✅ Owner manual add milestone + broadcast ke semua subscriber
