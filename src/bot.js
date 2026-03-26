@@ -325,11 +325,12 @@ function ensureCallTracked(item) {
       entryMcap: item.mc,
       entryPrice: toNum(item.p?.priceUsd),
       lastMilestoneHit: 1.0,
-      peakMcap: item.mc, // ✅ track peak dari awal
+      peakMcap: item.mc, // peak mulai dari entry, ATH sebelum call diabaikan
       firstSeenAt: Date.now(),
       imageUrl: item.p?.info?.imageUrl || item.p?.info?.header || null,
       parentMessageIds: {},
     };
+    console.log(`[call-tracked] ${item.p?.baseToken?.symbol} entry=${formatUsd(item.mc)}`);
     saveState(state);
   }
   return id;
